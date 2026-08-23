@@ -24,7 +24,10 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
-use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry};
+use crate::state::{
+    AppState, ChatMessageInfo, MessageRole, SubagentActivityInfo, SubagentActivityStatus,
+    ToolActivityInfo, TrajectoryEntry,
+};
 
 #[derive(Clone, Debug)]
 struct ContextMeterContext {
@@ -75,6 +78,29 @@ impl Selectable for ContextMeterTrigger {
 }
 
 impl RenderOnce for ContextMeterTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        self.toggle.checked(self.selected)
+    }
+}
+
+#[derive(IntoElement)]
+struct SubagentPopoverTrigger {
+    toggle: Toggle,
+    selected: bool,
+}
+
+impl Selectable for SubagentPopoverTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for SubagentPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         self.toggle.checked(self.selected)
     }
@@ -147,7 +173,7 @@ fn context_meter_view_model(
         provisional: context.provisional,
     }
 }
-use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
+use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
@@ -435,6 +461,8 @@ pub struct ChatListView {
         Vec<SlashCommandInfo>,
     )>,
     context_meter_open: bool,
+    subagents_popover_open: bool,
+    selected_subagent_run_id: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -605,6 +633,8 @@ impl ChatListView {
             trajectory_raw_json: None,
             slash_command_cache: None,
             context_meter_open: false,
+            subagents_popover_open: false,
+            selected_subagent_run_id: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -2873,11 +2903,339 @@ impl ChatListView {
         commands
     }
 
+    fn render_subagent_popover(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let subagents = self.model.read(cx).active_subagents().to_vec();
+        if subagents.is_empty() {
+            return None;
+        }
+        let active_count = subagents
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.status,
+                    SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+                )
+            })
+            .count();
+        let open = self.subagents_popover_open;
+        let toggle_entity = cx.entity();
+        let sync_entity = cx.entity();
+        let content_entity = cx.entity();
+        let count = subagents.len();
+        Some(
+            Popover::new("subagents-popover")
+                .anchor(Anchor::BottomRight)
+                .appearance(false)
+                .open(open)
+                .on_open_change(move |open, _window, cx| {
+                    sync_entity.update(cx, |this, cx| {
+                        this.subagents_popover_open = *open;
+                        cx.notify();
+                    });
+                })
+                .trigger(SubagentPopoverTrigger {
+                    selected: open,
+                    toggle: Toggle::new("subagents-popover-trigger")
+                        .ghost()
+                        .rounded_full()
+                        .tooltip("View subagent activity")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(Icon::new(IconName::Bot).small())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(count.to_string()),
+                                ),
+                        )
+                        .on_click(move |open, _window, cx| {
+                            toggle_entity.update(cx, |this, cx| {
+                                this.subagents_popover_open = *open;
+                                cx.notify();
+                            });
+                        }),
+                })
+                .content(move |_state, _window, cx| {
+                    content_entity.update(cx, |this, cx| {
+                        this.render_subagent_popover_content(active_count, cx)
+                    })
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_subagent_popover_content(
+        &mut self,
+        active_count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subagents = self.model.read(cx).active_subagents().to_vec();
+        let theme = cx.theme().colors;
+        let selected_run_id = self
+            .selected_subagent_run_id
+            .clone()
+            .filter(|run_id| {
+                subagents
+                    .iter()
+                    .any(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
+            })
+            .or_else(|| {
+                subagents
+                    .iter()
+                    .find(|item| item.status == SubagentActivityStatus::Running)
+                    .or_else(|| subagents.last())
+                    .and_then(|item| item.journal_run_id.clone())
+            });
+        let selected = selected_run_id.as_ref().and_then(|run_id| {
+            subagents
+                .iter()
+                .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
+        });
+        let mut rows = Vec::new();
+        for (index, item) in subagents.iter().enumerate() {
+            let run_id = item
+                .journal_run_id
+                .clone()
+                .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index));
+            let is_selected = selected_run_id.as_deref() == Some(run_id.as_str());
+            let (marker, color, status) = match item.status {
+                SubagentActivityStatus::Queued => ("○", theme.muted_foreground, "Queued"),
+                SubagentActivityStatus::Running => ("◌", theme.primary, "Working"),
+                SubagentActivityStatus::Completed => ("✓", theme.success, "Completed"),
+                SubagentActivityStatus::Failed => ("!", theme.danger, "Failed"),
+                SubagentActivityStatus::Cancelled => ("×", theme.warning, "Cancelled"),
+            };
+            let entity = cx.entity();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("subagent-popup-row-{index}")))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(is_selected, |row| row.bg(theme.muted))
+                    .hover(|row| row.bg(theme.muted))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.selected_subagent_run_id = Some(run_id.clone());
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .flex_none()
+                            .text_center()
+                            .text_color(color)
+                            .font_weight(FontWeight::BOLD)
+                            .child(marker),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(item.agent.clone()),
+                                    )
+                                    .child(
+                                        div().flex_none().text_xs().text_color(color).child(status),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(if item.task.is_empty() {
+                                        item.lane.clone().unwrap_or_default()
+                                    } else {
+                                        item.task.clone()
+                                    }),
+                            ),
+                    ),
+            );
+        }
+        let detail = selected.map(|item| self.render_subagent_detail(item, cx));
+        let count_label = if active_count > 0 {
+            format!("{active_count} active")
+        } else {
+            format!("{} completed", subagents.len())
+        };
+        div()
+            .w(px(520.0))
+            .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
+            .max_h(px(520.0))
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("Subagents"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(count_label),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .min_h(px(240.0))
+                    .child(
+                        div()
+                            .w(px(210.0))
+                            .flex_none()
+                            .p_2()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .overflow_y_scrollbar()
+                            .children(rows),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .p_3()
+                            .overflow_y_scrollbar()
+                            .children(detail),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_subagent_detail(
+        &mut self,
+        item: &SubagentActivityInfo,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().colors;
+        let status = match item.status {
+            SubagentActivityStatus::Queued => "Queued",
+            SubagentActivityStatus::Running => "Working",
+            SubagentActivityStatus::Completed => "Completed",
+            SubagentActivityStatus::Failed => "Failed",
+            SubagentActivityStatus::Cancelled => "Cancelled",
+        };
+        let messages = item
+            .messages
+            .iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|message| self.render_message(message, cx))
+            .collect::<Vec<_>>();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child(item.agent.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(status),
+                            ),
+                    )
+                    .when(!item.task.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(item.task.clone()),
+                        )
+                    }),
+            )
+            .children(item.error.as_ref().map(|error| {
+                div()
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme.danger.opacity(0.08))
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(error.clone())
+            }))
+            .children(messages.is_empty().then(|| {
+                div()
+                    .py_6()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Waiting for progress…")
+            }))
+            .children(messages)
+            .into_any_element()
+    }
+
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
-        let (selected_model, reasoning_effort, is_generating, pending_message, active_session_id) = {
+        let (
+            selected_model,
+            reasoning_effort,
+            is_generating,
+            pending_message,
+            active_session_id,
+            session_status,
+        ) = {
             let state = self.model.read(cx);
             (
                 state.selected_model.clone(),
@@ -2885,6 +3243,7 @@ impl ChatListView {
                 state.is_generating,
                 state.active_pending_composer_message().map(str::to_owned),
                 state.active_session_id.clone(),
+                state.session_status.clone(),
             )
         };
         let (metrics, context_window) = {
@@ -2902,14 +3261,7 @@ impl ChatListView {
                 });
             (state.active_session_metrics(), context_window)
         };
-        let lane_count = self
-            .model
-            .read(cx)
-            .active_trajectory()
-            .iter()
-            .filter_map(|entry| entry.lane.as_deref())
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let subagent_count = self.model.read(cx).active_subagents().len();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let (model_options, selected_option, project_root) = {
@@ -2920,6 +3272,7 @@ impl ChatListView {
             (options, opt, project)
         };
         let has_models = !model_options.is_empty();
+        let needs_provider = !has_models;
         let model_label = selected_option
             .as_ref()
             .map(|option| option.label.clone())
@@ -2962,6 +3315,55 @@ impl ChatListView {
                     )
             })
             .collect::<Vec<_>>();
+
+        let provider_setup_model = self.model.clone();
+        let provider_setup_banner = needs_provider.then(|| {
+            div()
+                .w_full()
+                .max_w(px(1000.0))
+                .mx_auto()
+                .mb_2()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.warning.opacity(0.45))
+                .bg(theme.warning.opacity(0.08))
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child("Connect a model provider to start"),
+                        )
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(
+                            "Add an account or API key in Settings, then choose a model here.",
+                        )),
+                )
+                .child(
+                    Button::new("composer-open-provider-settings")
+                        .icon(IconName::Settings)
+                        .label("Open Settings")
+                        .small()
+                        .primary()
+                        .on_click(move |_event, _window, cx| {
+                            provider_setup_model.update(cx, |state, cx| {
+                                controller::dispatch(state, AppAction::OpenSettings);
+                                cx.notify();
+                            });
+                        }),
+                )
+        });
 
         let pending_preview = pending_message.map(|text| {
             div()
@@ -3226,6 +3628,7 @@ impl ChatListView {
         } else {
             theme.accent
         };
+        let subagent_popover = self.render_subagent_popover(cx);
         let context_meter_open = self.context_meter_open;
         let toggle_context_meter = cx.entity();
         let sync_context_meter = cx.entity();
@@ -3310,7 +3713,7 @@ impl ChatListView {
                             .w_full()
                             .h(px(5.0))
                             .rounded_full()
-                            .bg(theme.border)
+                            .bg(theme.muted.opacity(0.8))
                             .child(
                                 div()
                                     .h_full()
@@ -3502,6 +3905,50 @@ impl ChatListView {
             .pt_3()
             .pb_2()
             .bg(theme.background)
+            .children(provider_setup_banner)
+            .children(session_status.filter(|status| {
+                !status.trim().is_empty()
+                    && status != "Working…"
+                    && status != "Reconciling session…"
+            }).map(|status| {
+                let is_error = status.starts_with("Could not")
+                    || status.starts_with("Failed")
+                    || status.starts_with("Error");
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .mx_auto()
+                    .mb_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if is_error {
+                        theme.danger.opacity(0.4)
+                    } else {
+                        theme.border
+                    })
+                    .bg(if is_error {
+                        theme.danger.opacity(0.08)
+                    } else {
+                        theme.title_bar
+                    })
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(if is_error {
+                        theme.danger
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(if is_error {
+                        IconName::CircleX
+                    } else {
+                        IconName::Asterisk
+                    })
+                    .child(div().min_w_0().child(status))
+            }))
             .children(pending_preview)
             .child(
                 div()
@@ -3539,6 +3986,7 @@ impl ChatListView {
                             .child(effort_picker)
                             .child(div().flex_1())
                             .child(stash_button)
+                            .children(subagent_popover)
                             .child(context_meter)
                             .child(
                                 Button::new("send-btn")
@@ -3550,13 +3998,17 @@ impl ChatListView {
                                         IconName::ArrowUp
                                     })
                                     .tooltip(if is_generating {
-                                        "Stop generation"
+                                        "Stop generation (Esc)"
+                                    } else if needs_provider {
+                                        "Connect a model provider in Settings before sending"
+                                    } else if has_prompt {
+                                        "Send message (Enter)"
                                     } else {
-                                        "Send message"
+                                        "Type a message to send"
                                     })
                                     .when(is_generating, |button| button.danger())
                                     .when(!is_generating, |button| button.primary())
-                                    .disabled(!is_generating && !has_prompt)
+                                    .disabled(!is_generating && (!has_prompt || needs_provider))
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         if is_generating {
                                             model.update(cx, |state, cx| {
@@ -3597,7 +4049,7 @@ impl ChatListView {
                     || metrics.tool_calls > 0
                     || billed_input_tokens > 0
                     || metrics.output_tokens > 0
-                    || lane_count > 0,
+                    || subagent_count > 0,
                 |this| {
                     this.child(
                         div()
@@ -3612,7 +4064,7 @@ impl ChatListView {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(format!(
-                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagent lanes",
+                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
                                 metrics.turns,
                                 metrics.tool_calls,
                                 crate::model_catalog::format_tokens(
@@ -3621,7 +4073,7 @@ impl ChatListView {
                                 crate::model_catalog::format_tokens(
                                     metrics.output_tokens.min(u64::from(u32::MAX)) as u32
                                 ),
-                                lane_count,
+                                subagent_count,
                             )),
                     )
                 },
@@ -3655,6 +4107,8 @@ impl Render for ChatListView {
             self.markdown_states.clear();
             self.trajectory_cache = None;
             self.trajectory_raw_json = None;
+            self.subagents_popover_open = false;
+            self.selected_subagent_run_id = None;
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -3697,9 +4151,56 @@ impl Render for ChatListView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(
-                                "No messages in this session yet. Type a prompt below to begin.",
-                            ))
+                            .px_4()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(440.0))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap_3()
+                                    .px_6()
+                                    .py_8()
+                                    .rounded_xl()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.title_bar)
+                                    .child(
+                                        div()
+                                            .size(px(40.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .bg(theme.primary.opacity(0.12))
+                                            .text_color(theme.primary)
+                                            .child(IconName::Bot),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child("Ready when you are"),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(320.0))
+                                            .text_center()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                "Describe what you want to build, investigate, or fix. Threadlane can use your project context and tools to help.",
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Press Enter to send · Shift+Enter for a new line"),
+                                    ),
+                            )
                             .into_any_element()
                     } else {
                         div()
@@ -3745,14 +4246,15 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
+        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
+        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, build_trajectory_rows,
+        build_transcript_rows, classify_chat_link, classify_markdown_update,
         context_meter_view_model, format_trajectory_raw_json, grouped_tool_activities,
-        summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
-        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+        summarize_trajectory,
     };
     use crate::state::{
-        reported_session_shape_state, ChatMessageInfo, MessageRole, ToolActivityInfo,
-        TrajectoryDiagnostics, TrajectoryEntry,
+        ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
+        reported_session_shape_state,
     };
 
     #[test]

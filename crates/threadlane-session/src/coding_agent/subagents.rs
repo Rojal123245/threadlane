@@ -8,22 +8,24 @@ use super::scheduler::AgentWorkScheduler;
 use super::scheduler::{
     AgentWork, AgentWorkObserver, DeterministicSubagentToolExecutor, SubagentBoundaryObserver,
 };
-use crate::agents::{discover_agents, AgentDefinition, AgentScope};
+use crate::agents::{AgentDefinition, AgentScope, discover_agents};
 use crate::policy::ToolPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use threadlane_runtime::harness::HookKind;
-use threadlane_runtime::{AgentEvent, AgentMessage, AgentRuntime, TurnState};
+use threadlane_runtime::{
+    AgentEvent, AgentMessage, AgentRuntime, SubagentProgressUpdate, TurnState,
+};
 use threadlane_wasi::WasiExtensionManager;
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub(crate) const MAX_SUBAGENT_TASKS: usize = 8;
 pub(crate) const MAX_SUBAGENT_TASK_CHARS: usize = 32_000;
@@ -216,45 +218,58 @@ pub(crate) fn aggregate_subagent_results(
         Err(format!("All subagents failed: {output}"))
     }
 }
-pub(crate) fn subagent_ui_event(event: AgentEvent, tool_call_prefix: &str) -> Option<AgentEvent> {
-    match event {
-        AgentEvent::AgentStart
-        | AgentEvent::AgentEnd { .. }
-        | AgentEvent::AgentError { .. }
-        | AgentEvent::TurnStart { .. }
-        | AgentEvent::TurnEnd { .. }
-        | AgentEvent::SubagentQueued { .. }
-        | AgentEvent::SubagentStarted { .. }
-        | AgentEvent::SubagentFinished { .. }
-        | AgentEvent::SubagentRecovery { .. } => None,
-        AgentEvent::MessageUpdate { .. } => None,
+pub(crate) fn subagent_ui_event(
+    event: AgentEvent,
+    run_id: u64,
+    task_index: usize,
+    journal_run_id: &str,
+    lane: &str,
+    tool_call_prefix: &str,
+) -> Option<AgentEvent> {
+    let update = match event {
+        AgentEvent::MessageUpdate {
+            text_delta: Some(delta),
+            ..
+        } => SubagentProgressUpdate::TextDelta { delta },
+        AgentEvent::MessageUpdate {
+            reasoning_delta: Some(delta),
+            ..
+        } => SubagentProgressUpdate::ReasoningDelta { delta },
         AgentEvent::ToolExecutionStart {
             tool_call_id,
             name,
             arguments,
-        } => Some(AgentEvent::ToolExecutionStart {
+        } => SubagentProgressUpdate::ToolStarted {
             tool_call_id: format!("{tool_call_prefix}{tool_call_id}"),
             name,
             arguments,
-        }),
+        },
         AgentEvent::ToolExecutionUpdate {
             tool_call_id,
             partial_result,
-        } => Some(AgentEvent::ToolExecutionUpdate {
+        } => SubagentProgressUpdate::ToolUpdated {
             tool_call_id: format!("{tool_call_prefix}{tool_call_id}"),
             partial_result,
-        }),
+        },
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
             name,
             result,
-        } => Some(AgentEvent::ToolExecutionEnd {
+        } => SubagentProgressUpdate::ToolFinished {
             tool_call_id: format!("{tool_call_prefix}{tool_call_id}"),
             name,
             result,
-        }),
-        event => Some(event),
-    }
+        },
+        AgentEvent::AgentError { error } => SubagentProgressUpdate::Error { error },
+        _ => return None,
+    };
+    Some(AgentEvent::SubagentUpdate {
+        run_id,
+        task_index,
+        journal_run_id: journal_run_id.to_owned(),
+        lane: lane.to_owned(),
+        update,
+    })
 }
 
 pub(crate) async fn checkpoint_new_subagent_messages(
@@ -446,6 +461,9 @@ pub(crate) async fn run_subagents_with_context(
                         run_id,
                         task_index,
                         journal_run_id: identity.run_id.clone(),
+                        lane: identity.lane_name.clone(),
+                        agent: lane_agent.clone(),
+                        task: lane_task.clone(),
                     });
                     #[cfg(test)]
                     if let Some(observer) = context.child_work_observer.as_ref() {
@@ -732,10 +750,19 @@ You are an isolated subagent working in {}. Complete only the assigned task and 
 
     let mut ui_events = agent.subscribe();
     let ui_event_prefix = format!("subagent-{run_id}:{task_index}:",);
+    let ui_journal_run_id = journal_run_id.clone();
+    let ui_lane_name = lane_name.clone();
     let event_tx_clone = context.parent_event_tx.clone();
     tokio::spawn(async move {
         while let Ok(event) = ui_events.recv().await {
-            if let Some(event) = subagent_ui_event(event, &ui_event_prefix) {
+            if let Some(event) = subagent_ui_event(
+                event,
+                run_id,
+                task_index,
+                &ui_journal_run_id,
+                &ui_lane_name,
+                &ui_event_prefix,
+            ) {
                 let _ = event_tx_clone.send(event);
             }
         }
@@ -928,6 +955,62 @@ mod result_tests {
             error: None,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn subagent_ui_event_preserves_identity_and_stream_content() {
+        let event = subagent_ui_event(
+            AgentEvent::MessageUpdate {
+                text_delta: Some("working".into()),
+                reasoning_delta: None,
+                tool_call_name: None,
+            },
+            7,
+            2,
+            "journal-run",
+            "child-lane",
+            "subagent-7:2:",
+        )
+        .unwrap();
+
+        assert_eq!(
+            event,
+            AgentEvent::SubagentUpdate {
+                run_id: 7,
+                task_index: 2,
+                journal_run_id: "journal-run".into(),
+                lane: "child-lane".into(),
+                update: SubagentProgressUpdate::TextDelta {
+                    delta: "working".into(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn subagent_ui_event_scopes_tool_ids_without_parsing_them() {
+        let event = subagent_ui_event(
+            AgentEvent::ToolExecutionStart {
+                tool_call_id: "provider:id:with:colons".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+            4,
+            1,
+            "journal-run",
+            "child-lane",
+            "subagent-4:1:",
+        )
+        .unwrap();
+
+        let AgentEvent::SubagentUpdate { update, .. } = event else {
+            panic!("expected a subagent update");
+        };
+        assert!(matches!(
+            update,
+            SubagentProgressUpdate::ToolStarted { tool_call_id, .. }
+                if tool_call_id == "subagent-4:1:provider:id:with:colons"
+        ));
     }
 
     #[test]

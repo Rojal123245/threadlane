@@ -5,10 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
-    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan, TokenUsage,
+    AgentEvent, AgentMessage, ImageAttachment, ReasoningEffort, SessionPlan,
+    SubagentProgressUpdate, TokenUsage,
 };
 
-use crate::adapters::agent_events::{adapt_agent_event, ChatAgentUpdate};
+use crate::adapters::agent_events::{ChatAgentUpdate, adapt_agent_event};
 use crate::persistence::load_project_registry;
 use crate::services::sessions::{ExecutionMode, SessionRuntime, SessionRuntimeStatus};
 
@@ -164,6 +165,28 @@ pub struct ChatMessageInfo {
     pub(crate) reasoning_expanded: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentActivityStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubagentActivityInfo {
+    pub(crate) batch_run_id: u64,
+    pub(crate) task_index: usize,
+    pub(crate) journal_run_id: Option<String>,
+    pub(crate) lane: Option<String>,
+    pub(crate) agent: String,
+    pub(crate) task: String,
+    pub(crate) status: SubagentActivityStatus,
+    pub(crate) messages: Vec<ChatMessageInfo>,
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum ChatStreamEvent {
     Agent {
@@ -208,6 +231,7 @@ pub(crate) struct SessionHydrationRequest {
 pub(crate) struct SessionProjectionResult {
     pub(crate) plan: SessionPlan,
     pub(crate) trajectory: Vec<TrajectoryEntry>,
+    pub(crate) subagents: Vec<SubagentActivityInfo>,
     pub(crate) diagnostics: threadlane_session::harness::SessionDiagnostics,
     pub(crate) metrics: SessionMetricsInfo,
     pub(crate) token_usage: TokenUsage,
@@ -229,6 +253,7 @@ pub struct AppState {
     pending_composer_messages: HashMap<String, String>,
     session_token_usage: HashMap<SessionProjectionKey, TokenUsage>,
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
+    subagents_by_session: HashMap<SessionProjectionKey, Vec<SubagentActivityInfo>>,
     trajectory_revision: u64,
     diagnostics_by_session:
         HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
@@ -415,7 +440,7 @@ pub fn load_session_messages(session_file: &Path) -> Vec<ChatMessageInfo> {
 pub(crate) fn compute_session_messages(
     session_file: &Path,
 ) -> Result<Vec<ChatMessageInfo>, String> {
-    use threadlane_session::harness::{read_transcript_page, TranscriptItem};
+    use threadlane_session::harness::{TranscriptItem, read_transcript_page};
 
     // The durable pager is the single transcript source, but exhaust it here:
     // GPUI state continues to expose complete chronological history.
@@ -484,14 +509,134 @@ pub(crate) fn compute_full_session_projection(
         .map_err(|error| error.to_string())?;
     let (trajectory, metrics, token_usage, context_window) =
         AppState::project_trajectory_from_store(&store);
+    let subagents = project_subagents_from_store(&store);
     Ok(SessionProjectionResult {
         plan: store.plan(),
         trajectory,
+        subagents,
         diagnostics,
         metrics,
         token_usage,
         context_window,
     })
+}
+
+fn project_subagents_from_store(store: &impl SessionStore) -> Vec<SubagentActivityInfo> {
+    use threadlane_session::harness::{Record, SubagentLifecyclePhase};
+
+    let mut rows = Vec::new();
+    for lane in store.lanes().into_iter().filter(|lane| lane != "main") {
+        let has_subagent_lifecycle = store.records().iter().any(|record| {
+            matches!(
+                record,
+                Record::SubagentLifecycle { subagent_lane, .. }
+                    if subagent_lane.as_str() == lane
+            )
+        });
+        let transcript = store.transcript(&lane);
+        let has_subagent_marker = transcript.entries.iter().any(|entry| {
+            matches!(
+                &entry.message,
+                AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
+            )
+        });
+        if !has_subagent_lifecycle && !has_subagent_marker {
+            continue;
+        }
+        let mut run_id = String::new();
+        let mut agent = lane.clone();
+        let mut task = String::new();
+        let mut status = SubagentActivityStatus::Running;
+        let mut error = None;
+        let mut messages = Vec::new();
+        for entry in transcript.entries {
+            match entry.message {
+                AgentMessage::Custom {
+                    custom_type,
+                    payload,
+                } if custom_type == "subagent_lane" => {
+                    run_id = payload
+                        .get("run_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    agent = payload
+                        .get("agent")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&agent)
+                        .to_owned();
+                    task = payload
+                        .get("task")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    error = payload
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                    status = match payload.get("status").and_then(serde_json::Value::as_str) {
+                        Some("completed") => SubagentActivityStatus::Completed,
+                        Some("failed") => SubagentActivityStatus::Failed,
+                        _ => SubagentActivityStatus::Running,
+                    };
+                }
+                message => messages.push(message),
+            }
+        }
+        let latest = store
+            .records()
+            .iter()
+            .filter_map(|record| match record {
+                Record::SubagentLifecycle {
+                    seq,
+                    child_run_id,
+                    agent_id,
+                    subagent_lane,
+                    phase,
+                    error,
+                    ..
+                } if subagent_lane.as_str() == lane => Some((
+                    *seq,
+                    child_run_id.as_str(),
+                    agent_id.as_str(),
+                    phase,
+                    error.as_ref().map(|error| error.as_str()),
+                )),
+                _ => None,
+            })
+            .max_by_key(|item| item.0);
+        if let Some((_, durable_run_id, durable_agent, phase, durable_error)) = latest {
+            run_id = durable_run_id.to_owned();
+            if agent == lane {
+                agent = durable_agent.to_owned();
+            }
+            status = match phase {
+                SubagentLifecyclePhase::Spawned => SubagentActivityStatus::Queued,
+                SubagentLifecyclePhase::Started => SubagentActivityStatus::Running,
+                SubagentLifecyclePhase::Completed => SubagentActivityStatus::Completed,
+                SubagentLifecyclePhase::Failed => SubagentActivityStatus::Failed,
+                SubagentLifecyclePhase::Cancelled => SubagentActivityStatus::Cancelled,
+            };
+            if durable_error.is_some() {
+                error = durable_error.map(str::to_owned);
+            }
+        }
+        if run_id.is_empty() {
+            run_id = lane.clone();
+        }
+        rows.push(SubagentActivityInfo {
+            batch_run_id: 0,
+            task_index: rows.len(),
+            journal_run_id: Some(run_id),
+            lane: Some(lane),
+            agent,
+            task,
+            status,
+            messages: project_agent_messages(messages),
+            error,
+        });
+    }
+    rows
 }
 
 fn tool_activity_summary(name: &str, arguments: &str) -> String {
@@ -782,6 +927,7 @@ impl AppState {
             pending_composer_messages: HashMap::new(),
             session_token_usage: HashMap::new(),
             trajectory_by_session: HashMap::new(),
+            subagents_by_session: HashMap::new(),
             trajectory_revision: 0,
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
@@ -1320,26 +1466,49 @@ impl AppState {
 
         let record = threadlane_session::register_project(&canonical)?;
 
-        if !self
+        let discovered_sessions = discover_sessions_in_project(&canonical);
+        let session_to_restore = record
+            .last_session_id
+            .filter(|session_id| {
+                discovered_sessions
+                    .iter()
+                    .any(|session| session.id == *session_id)
+            })
+            .or_else(|| {
+                discovered_sessions
+                    .first()
+                    .map(|session| session.id.clone())
+            });
+
+        if let Some(project) = self
             .projects
-            .iter()
-            .any(|project| project.work_dir == canonical)
+            .iter_mut()
+            .find(|project| project.work_dir == canonical)
         {
+            project.name = record.name;
+            project.sessions = discovered_sessions;
+            project.is_expanded = true;
+        } else {
             self.projects.push(ProjectInfo {
                 name: record.name,
-                sessions: discover_sessions_in_project(&canonical),
+                sessions: discovered_sessions,
                 work_dir: canonical.clone(),
                 is_expanded: true,
             });
         }
-        self.active_work_dir = Some(canonical);
-        self.active_session_id = None;
-        self.is_new_task = true;
-        self.messages = Arc::new(Vec::new());
-        self.active_plan = SessionPlan::default();
-        self.is_generating = false;
-        self.session_status = None;
-        self.refresh_available_models();
+
+        if let Some(session_id) = session_to_restore {
+            self.select_session(canonical, session_id);
+        } else {
+            self.active_work_dir = Some(canonical);
+            self.active_session_id = None;
+            self.is_new_task = true;
+            self.messages = Arc::new(Vec::new());
+            self.active_plan = SessionPlan::default();
+            self.is_generating = false;
+            self.session_status = None;
+            self.refresh_available_models();
+        }
         Ok(())
     }
 
@@ -1383,6 +1552,8 @@ impl AppState {
             .insert(key.clone(), result.diagnostics);
         self.trajectory_by_session
             .insert(key.clone(), result.trajectory);
+        self.subagents_by_session
+            .insert(key.clone(), result.subagents);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.session_metrics.insert(key.clone(), result.metrics);
         if let Some(context_window) = result.context_window {
@@ -1562,7 +1733,10 @@ impl AppState {
                         summary: format!("Usage: {} total tokens ({cause:?})", usage.total_tokens),
                         detail: format!(
                             "input: {}, output: {}, cache read: {}, cache write: {}",
-                            usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_read_tokens,
+                            usage.cache_write_tokens
                         ),
                         lane: Some(lane.clone()),
                         correlation_id: None,
@@ -1585,7 +1759,11 @@ impl AppState {
                 } => {
                     let prompt_text = match system_prompt {
                         threadlane_session::harness::PromptSnapshot::Full { sha256, content } => {
-                            format!("### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```", sha256.as_str(), content.as_str())
+                            format!(
+                                "### System Prompt (SHA256 `{}`)\n\n```markdown\n{}\n```",
+                                sha256.as_str(),
+                                content.as_str()
+                            )
                         }
                         threadlane_session::harness::PromptSnapshot::Redacted {
                             sha256,
@@ -1775,7 +1953,8 @@ impl AppState {
                         detail_lines.push(format!("**Category**: `{:?}`", err.category));
                         detail_lines.push(format!("**Retryable**: `{}`", err.retryable));
                         if let Some(code) = err.code.as_ref() {
-                            detail_lines.push(format!("**Error Details**:\n```\n{}\n```", code.as_str()));
+                            detail_lines
+                                .push(format!("**Error Details**:\n```\n{}\n```", code.as_str()));
                         }
                     }
                     Some(TrajectoryEntry {
@@ -1792,7 +1971,10 @@ impl AppState {
                             status: Some(format!("{outcome:?}")),
                             duration_ms: *duration_ms,
                             source: Some("Provider request lifecycle".into()),
-                            raw: Some(format!("outcome={outcome:?}; request_id={}", request_id.as_ref().map(|id| id.as_str()).unwrap_or("none"))),
+                            raw: Some(format!(
+                                "outcome={outcome:?}; request_id={}",
+                                request_id.as_ref().map(|id| id.as_str()).unwrap_or("none")
+                            )),
                             ..Default::default()
                         },
                     })
@@ -1842,7 +2024,10 @@ impl AppState {
                     request: None,
                     category: "Permission".into(),
                     summary: format!("{} permission requested", capability.as_str()),
-                    detail: format!("scopes {scopes:?}; detail sha256 {}", detail_sha256.as_str()),
+                    detail: format!(
+                        "scopes {scopes:?}; detail sha256 {}",
+                        detail_sha256.as_str()
+                    ),
                     lane: Some(lane.clone()),
                     correlation_id: Some(request_id.as_str().to_owned()),
                     diagnostics: TrajectoryDiagnostics::default(),
@@ -1932,13 +2117,21 @@ impl AppState {
                     correlation_id: Some(tool_call_id.as_str().to_owned()),
                     diagnostics: TrajectoryDiagnostics {
                         duration_ms: *duration_ms,
-                        status: outcome.as_ref().map(|o| format!("{o:?}")).or_else(|| Some(format!("{phase:?}"))),
+                        status: outcome
+                            .as_ref()
+                            .map(|o| format!("{o:?}"))
+                            .or_else(|| Some(format!("{phase:?}"))),
                         exit_code: *exit_code,
                         output_bytes: *output_bytes,
                         source: Some(format!("Tool Executor ({})", executor_kind.as_str())),
                         raw: Some(format!(
                             "tool={}; phase={:?}; outcome={:?}; duration={:?}ms; exit_code={:?}; output_bytes={:?}",
-                            tool_name.as_str(), phase, outcome, duration_ms, exit_code, output_bytes
+                            tool_name.as_str(),
+                            phase,
+                            outcome,
+                            duration_ms,
+                            exit_code,
+                            output_bytes
                         )),
                         ..Default::default()
                     },
@@ -2384,6 +2577,8 @@ impl AppState {
         self.active_plan = result.plan;
         self.trajectory_by_session
             .insert(key.clone(), result.trajectory);
+        self.subagents_by_session
+            .insert(key.clone(), result.subagents);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
         self.diagnostics_by_session
             .insert(key.clone(), result.diagnostics);
@@ -2394,6 +2589,220 @@ impl AppState {
             self.context_windows.remove(&key);
         }
         self.session_token_usage.insert(key, result.token_usage);
+    }
+
+    fn record_subagent_activity(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::SubagentQueued {
+                run_id,
+                task_index,
+                agent,
+                task,
+            } => {
+                let Some(subagents) = self.active_subagents_mut() else {
+                    return;
+                };
+                if subagents.iter().any(|subagent| {
+                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
+                }) {
+                    return;
+                }
+                subagents.push(SubagentActivityInfo {
+                    batch_run_id: *run_id,
+                    task_index: *task_index,
+                    journal_run_id: None,
+                    lane: None,
+                    agent: agent.clone(),
+                    task: task.clone(),
+                    status: SubagentActivityStatus::Queued,
+                    messages: Vec::new(),
+                    error: None,
+                });
+            }
+            AgentEvent::SubagentStarted {
+                run_id,
+                task_index,
+                journal_run_id,
+                lane,
+                agent,
+                task,
+            } => {
+                let Some(subagents) = self.active_subagents_mut() else {
+                    return;
+                };
+                if let Some(subagent) = subagents.iter_mut().find(|subagent| {
+                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
+                }) {
+                    subagent.journal_run_id = Some(journal_run_id.clone());
+                    subagent.lane = Some(lane.clone());
+                    subagent.agent = agent.clone();
+                    subagent.task = task.clone();
+                    subagent.status = SubagentActivityStatus::Running;
+                }
+            }
+            AgentEvent::SubagentUpdate {
+                run_id,
+                task_index,
+                journal_run_id,
+                lane,
+                update,
+            } => {
+                let Some(subagents) = self.active_subagents_mut() else {
+                    return;
+                };
+                let Some(subagent) = subagents.iter_mut().find(|subagent| {
+                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
+                }) else {
+                    return;
+                };
+                subagent.journal_run_id = Some(journal_run_id.clone());
+                subagent.lane = Some(lane.clone());
+                subagent.status = SubagentActivityStatus::Running;
+                match update {
+                    SubagentProgressUpdate::TextDelta { delta } => {
+                        if let Some(message) = subagent.messages.last_mut().filter(|message| {
+                            message.role == MessageRole::Assistant
+                                && message.streaming
+                                && message.tool_activities.is_empty()
+                        }) {
+                            message.content.push_str(delta);
+                        } else {
+                            subagent.messages.push(ChatMessageInfo {
+                                id: format!(
+                                    "subagent-{journal_run_id}-{}",
+                                    subagent.messages.len()
+                                ),
+                                role: MessageRole::Assistant,
+                                content: delta.clone(),
+                                tool_activities: Vec::new(),
+                                streaming: true,
+                                reasoning_content: None,
+                                reasoning_expanded: false,
+                            });
+                        }
+                    }
+                    SubagentProgressUpdate::ReasoningDelta { delta } => {
+                        if let Some(message) = subagent.messages.last_mut().filter(|message| {
+                            message.role == MessageRole::Assistant && message.streaming
+                        }) {
+                            match &mut message.reasoning_content {
+                                Some(reasoning) => reasoning.push_str(delta),
+                                None => message.reasoning_content = Some(delta.clone()),
+                            }
+                        } else {
+                            subagent.messages.push(ChatMessageInfo {
+                                id: format!(
+                                    "subagent-{journal_run_id}-{}",
+                                    subagent.messages.len()
+                                ),
+                                role: MessageRole::Assistant,
+                                content: String::new(),
+                                tool_activities: Vec::new(),
+                                streaming: true,
+                                reasoning_content: Some(delta.clone()),
+                                reasoning_expanded: false,
+                            });
+                        }
+                    }
+                    SubagentProgressUpdate::ToolStarted {
+                        tool_call_id,
+                        name,
+                        arguments,
+                    } => {
+                        let activity = ToolActivityInfo {
+                            id: tool_call_id.clone(),
+                            category: "Working".into(),
+                            title: name.clone(),
+                            display_summary: tool_activity_display_summary(&tool_activity_summary(
+                                name, arguments,
+                            )),
+                            detail: arguments.clone(),
+                            is_expanded: false,
+                        };
+                        if let Some(message) = subagent.messages.last_mut().filter(|message| {
+                            message.role == MessageRole::Assistant && message.content.is_empty()
+                        }) {
+                            message.tool_activities.push(activity);
+                        } else {
+                            subagent.messages.push(ChatMessageInfo {
+                                id: format!(
+                                    "subagent-{journal_run_id}-{}",
+                                    subagent.messages.len()
+                                ),
+                                role: MessageRole::Assistant,
+                                content: String::new(),
+                                tool_activities: vec![activity],
+                                streaming: true,
+                                reasoning_content: None,
+                                reasoning_expanded: false,
+                            });
+                        }
+                    }
+                    SubagentProgressUpdate::ToolUpdated {
+                        tool_call_id,
+                        partial_result,
+                    } => {
+                        if let Some(activity) = subagent
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .flat_map(|message| message.tool_activities.iter_mut().rev())
+                            .find(|activity| activity.id == *tool_call_id)
+                        {
+                            activity.detail = partial_result.clone();
+                        }
+                    }
+                    SubagentProgressUpdate::ToolFinished {
+                        tool_call_id,
+                        result,
+                        ..
+                    } => {
+                        if let Some(activity) = subagent
+                            .messages
+                            .iter_mut()
+                            .rev()
+                            .flat_map(|message| message.tool_activities.iter_mut().rev())
+                            .find(|activity| activity.id == *tool_call_id)
+                        {
+                            activity.category = if result.is_error {
+                                "Error".into()
+                            } else {
+                                "Completed".into()
+                            };
+                            activity.detail = result.content.clone();
+                        }
+                    }
+                    SubagentProgressUpdate::Error { error } => {
+                        subagent.error = Some(error.clone());
+                    }
+                }
+            }
+            AgentEvent::SubagentFinished {
+                run_id,
+                task_index,
+                succeeded,
+                error,
+                ..
+            } => {
+                let Some(subagents) = self.active_subagents_mut() else {
+                    return;
+                };
+                if let Some(subagent) = subagents.iter_mut().find(|subagent| {
+                    subagent.batch_run_id == *run_id && subagent.task_index == *task_index
+                }) {
+                    subagent.status = if *succeeded {
+                        SubagentActivityStatus::Completed
+                    } else {
+                        SubagentActivityStatus::Failed
+                    };
+                    subagent.error = error.clone();
+                    for message in &mut subagent.messages {
+                        message.streaming = false;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn record_trajectory(&mut self, session_id: &str, event: &AgentEvent) {
@@ -2631,6 +3040,18 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn active_subagents(&self) -> &[SubagentActivityInfo] {
+        self.active_session_projection_key()
+            .and_then(|key| self.subagents_by_session.get(&key))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn active_subagents_mut(&mut self) -> Option<&mut Vec<SubagentActivityInfo>> {
+        let key = self.active_session_projection_key()?;
+        Some(self.subagents_by_session.entry(key).or_default())
+    }
+
     pub(crate) fn active_session_metrics(&self) -> SessionMetricsInfo {
         self.active_session_projection_key()
             .and_then(|key| self.session_metrics.get(&key))
@@ -2698,6 +3119,7 @@ impl AppState {
                         }
                     }
                     self.record_trajectory(&session_id, &event);
+                    self.record_subagent_activity(&event);
                     let key = self
                         .active_session_projection_key()
                         .expect("active stream event must have a projection key");
@@ -2895,6 +3317,23 @@ impl AppState {
                     active_changed = true;
                     self.pending_permissions.remove(&session_id);
                     self.is_generating = false;
+                    if let Some(subagents) = self.active_subagents_mut() {
+                        for subagent in subagents.iter_mut().filter(|subagent| {
+                            matches!(
+                                subagent.status,
+                                SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+                            )
+                        }) {
+                            subagent.status = SubagentActivityStatus::Cancelled;
+                            if subagent.error.is_none() {
+                                subagent.error =
+                                    Some("Parent generation stopped before completion.".into());
+                            }
+                            for message in &mut subagent.messages {
+                                message.streaming = false;
+                            }
+                        }
+                    }
                     self.session_status = Some("Reconciling session…".into());
                     self.pending_hydrations.push(SessionHydrationRequest {
                         session_id: session_id.clone(),
@@ -3266,8 +3705,8 @@ pub(crate) use tests::reported_session_shape_state;
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
@@ -3373,8 +3812,8 @@ mod tests {
 
     async fn generated_reported_session_path() -> PathBuf {
         use threadlane_runtime::AgentConfig;
-        use threadlane_session::coding_agent::CodingAgentOptions;
         use threadlane_session::SystemPromptConfig;
+        use threadlane_session::coding_agent::CodingAgentOptions;
 
         let root = tempfile::tempdir().unwrap().keep();
         let skill_dir = root.join(".agents/skills/reported-shape");
@@ -3443,7 +3882,7 @@ mod tests {
         assert!(!projected_context.context_limit_is_estimate);
 
         // Inspect the production journal again, independently of the GPUI projection above.
-        use threadlane_session::harness::{read_transcript_page, CompactionReason, TranscriptItem};
+        use threadlane_session::harness::{CompactionReason, TranscriptItem, read_transcript_page};
 
         let store = JsonlStore::open(&path).unwrap();
         let records = store.records();
@@ -3802,9 +4241,11 @@ mod tests {
             first.iter().map(|row| &row.id).collect::<Vec<_>>(),
             second.iter().map(|row| &row.id).collect::<Vec<_>>()
         );
-        assert!(!first
-            .iter()
-            .any(|message| message.content.contains("Context checkpoint from")));
+        assert!(
+            !first
+                .iter()
+                .any(|message| message.content.contains("Context checkpoint from"))
+        );
         assert!(first.iter().any(|message| {
             message.role == MessageRole::User && message.content == "continue the cached tool loop"
         }));
@@ -3839,10 +4280,12 @@ mod tests {
             })
             .unwrap();
         drop(store);
-        assert!(compute_session_messages(&path)
-            .unwrap()
-            .iter()
-            .all(|message| message.role != MessageRole::ContextMarker));
+        assert!(
+            compute_session_messages(&path)
+                .unwrap()
+                .iter()
+                .all(|message| message.role != MessageRole::ContextMarker)
+        );
         assert_eq!(
             compute_full_session_projection(&path)
                 .unwrap()
@@ -4574,6 +5017,83 @@ mod tests {
     }
 
     #[test]
+    fn durable_subagent_projection_ignores_unrelated_named_lanes() {
+        use threadlane_session::harness::{Entry, SurfaceOperation};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = JsonlStore::open(&path).unwrap();
+        store
+            .append_entry(Entry {
+                id: "background-entry".into(),
+                parent_id: None,
+                lane: "background-task".into(),
+                seq: 1,
+                timestamp: 1,
+                message: AgentMessage::Assistant {
+                    content: Some("not a subagent".into()),
+                    tool_calls: None,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+                surface_op: SurfaceOperation::Append,
+                terminate: false,
+            })
+            .unwrap();
+        drop(store);
+
+        assert!(
+            compute_full_session_projection(&path)
+                .unwrap()
+                .subagents
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn live_subagent_updates_are_isolated_from_main_transcript() {
+        let mut state = AppState::load_from_registry(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_path_buf();
+        state.active_work_dir = Some(work_dir.clone());
+        state.active_session_id = Some("session".into());
+        state.subagents_by_session.insert(
+            AppState::projection_key("session", &state.session_file(&work_dir, "session")),
+            Vec::new(),
+        );
+        state.record_subagent_activity(&AgentEvent::SubagentQueued {
+            run_id: 1,
+            task_index: 0,
+            agent: "scout".into(),
+            task: "inspect".into(),
+        });
+        state.record_subagent_activity(&AgentEvent::SubagentStarted {
+            run_id: 1,
+            task_index: 0,
+            journal_run_id: "child-run".into(),
+            lane: "child-lane".into(),
+            agent: "scout".into(),
+            task: "inspect".into(),
+        });
+        state.record_subagent_activity(&AgentEvent::SubagentUpdate {
+            run_id: 1,
+            task_index: 0,
+            journal_run_id: "child-run".into(),
+            lane: "child-lane".into(),
+            update: SubagentProgressUpdate::TextDelta {
+                delta: "live progress".into(),
+            },
+        });
+
+        assert!(state.messages.is_empty());
+        let subagent = state.active_subagents().first().unwrap();
+        assert_eq!(subagent.status, SubagentActivityStatus::Running);
+        assert_eq!(subagent.agent, "scout");
+        assert_eq!(subagent.task, "inspect");
+        assert_eq!(subagent.messages[0].content, "live progress");
+    }
+
+    #[test]
     fn session_switch_preserves_live_trajectory_and_applies_deferred_events() {
         let dir = tempfile::tempdir().unwrap();
         let work_dir = dir.path().to_path_buf();
@@ -4739,9 +5259,11 @@ mod tests {
 
         let trajectory = &state.trajectory_by_session[&cached_key(&state, "old-session")];
         assert!(trajectory.iter().any(|entry| entry.category == "Operation"));
-        assert!(trajectory
-            .iter()
-            .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" }));
+        assert!(
+            trajectory
+                .iter()
+                .any(|entry| { entry.category == "Input" && entry.detail == "old prompt" })
+        );
         assert!(trajectory.iter().any(|entry| entry.category == "Step"));
         assert!(trajectory.iter().any(|entry| {
             entry.category == "Tool"
@@ -5191,12 +5713,16 @@ mod tests {
             .trajectory_by_session
             .get(&cached_key(&state, "branch-session"))
             .unwrap();
-        assert!(trajectory
-            .iter()
-            .any(|t| t.run_id.as_deref() == Some("run-branch-a")));
-        assert!(trajectory
-            .iter()
-            .any(|t| t.run_id.as_deref() == Some("run-branch-b")));
+        assert!(
+            trajectory
+                .iter()
+                .any(|t| t.run_id.as_deref() == Some("run-branch-a"))
+        );
+        assert!(
+            trajectory
+                .iter()
+                .any(|t| t.run_id.as_deref() == Some("run-branch-b"))
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

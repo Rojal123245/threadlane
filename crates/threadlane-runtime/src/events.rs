@@ -55,6 +55,16 @@ pub enum AgentEvent {
         run_id: u64,
         task_index: usize,
         journal_run_id: String,
+        lane: String,
+        agent: String,
+        task: String,
+    },
+    SubagentUpdate {
+        run_id: u64,
+        task_index: usize,
+        journal_run_id: String,
+        lane: String,
+        update: SubagentProgressUpdate,
     },
     SubagentFinished {
         run_id: u64,
@@ -116,6 +126,34 @@ pub enum SubagentRecoveryStatus {
     Recovered,
     Retrying,
     Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SubagentProgressUpdate {
+    TextDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    ToolStarted {
+        tool_call_id: String,
+        name: String,
+        arguments: String,
+    },
+    ToolUpdated {
+        tool_call_id: String,
+        partial_result: String,
+    },
+    ToolFinished {
+        tool_call_id: String,
+        name: String,
+        result: AgentToolResult,
+    },
+    Error {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
