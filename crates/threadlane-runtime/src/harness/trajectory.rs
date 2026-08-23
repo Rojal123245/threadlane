@@ -237,6 +237,8 @@ fn extract_mutated_files(tool_name: &str, args: &serde_json::Value) -> Option<St
             | "replace_file_content"
             | "multi_replace_file_content"
             | "edit_file_hashline"
+            | "edit_files_hashline"
+            | "apply_workspace_edit_plan"
     ) {
         args.get("path")
             .or_else(|| args.get("file_path"))

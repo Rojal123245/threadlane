@@ -59,7 +59,6 @@ pub fn classify_path_change(root: &Path, path: &Path, kind: &EventKind) -> Chang
             || path_str.ends_with(".git/HEAD")
             || path_str.contains(".git/refs/")
             || path_str.ends_with(".git/config")
-            || path_str.ends_with(".git/FETCH_HEAD")
             || path_str.ends_with(".git/MERGE_HEAD")
         {
             is_git_metadata = true;
@@ -207,6 +206,18 @@ mod tests {
         assert_eq!(
             classify_path_change(root, ref_path, &kind),
             ChangeClassification::GitOnly
+        );
+    }
+
+    #[test]
+    fn test_classify_fetch_head_ignored() {
+        let root = Path::new("/workspace");
+        let fetch_head = Path::new("/workspace/.git/FETCH_HEAD");
+        let kind = EventKind::Modify(notify::event::ModifyKind::Any);
+
+        assert_eq!(
+            classify_path_change(root, fetch_head, &kind),
+            ChangeClassification::Ignored
         );
     }
 

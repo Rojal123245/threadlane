@@ -256,6 +256,7 @@ pub struct AppState {
     trajectory_by_session: HashMap<SessionProjectionKey, Vec<TrajectoryEntry>>,
     subagents_by_session: HashMap<SessionProjectionKey, Vec<SubagentActivityInfo>>,
     trajectory_revision: u64,
+    trajectory_epoch: u64,
     diagnostics_revision: u64,
     diagnostics_by_session:
         HashMap<SessionProjectionKey, threadlane_session::harness::SessionDiagnostics>,
@@ -896,10 +897,6 @@ impl AppState {
         let model_roles = threadlane_session::ModelRoles::default();
         let mut session_runtimes = HashMap::new();
         let mut session_status = None;
-        let initial_messages = active_session_file
-            .as_deref()
-            .map(load_session_messages)
-            .unwrap_or_default();
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
             (Some(work_dir), Some(session_file)) => {
                 let runtime = SessionRuntime::new(
@@ -911,11 +908,11 @@ impl AppState {
                     ),
                     ExecutionMode::Interactive,
                 );
-                let messages = initial_messages;
                 selected_model = runtime.selected_model.clone();
-                session_status = runtime_status_text(runtime.status());
+                session_status = runtime_status_text(runtime.status())
+                    .or_else(|| Some("Loading session…".into()));
                 session_runtimes.insert(session_file.clone(), runtime);
-                messages
+                Vec::new()
             }
             _ => Vec::new(),
         };
@@ -940,6 +937,7 @@ impl AppState {
             trajectory_by_session: HashMap::new(),
             subagents_by_session: HashMap::new(),
             trajectory_revision: 0,
+            trajectory_epoch: 0,
             diagnostics_revision: 0,
             diagnostics_by_session: HashMap::new(),
             session_metrics: HashMap::new(),
@@ -975,7 +973,7 @@ impl AppState {
             state.pending_hydrations.push(SessionHydrationRequest {
                 session_id,
                 session_file: session_file.to_path_buf(),
-                reload_messages: false,
+                reload_messages: true,
             });
         }
         state
@@ -1565,6 +1563,7 @@ impl AppState {
         self.diagnostics_revision = self.diagnostics_revision.wrapping_add(1);
         self.trajectory_by_session
             .insert(key.clone(), result.trajectory);
+        self.trajectory_epoch = self.trajectory_epoch.wrapping_add(1);
         self.subagents_by_session
             .insert(key.clone(), result.subagents);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
@@ -2590,6 +2589,7 @@ impl AppState {
         self.active_plan = result.plan;
         self.trajectory_by_session
             .insert(key.clone(), result.trajectory);
+        self.trajectory_epoch = self.trajectory_epoch.wrapping_add(1);
         self.subagents_by_session
             .insert(key.clone(), result.subagents);
         self.trajectory_revision = self.trajectory_revision.wrapping_add(1);
@@ -3044,6 +3044,10 @@ impl AppState {
 
     pub(crate) fn trajectory_revision(&self) -> u64 {
         self.trajectory_revision
+    }
+
+    pub(crate) fn trajectory_epoch(&self) -> u64 {
+        self.trajectory_epoch
     }
 
     pub(crate) fn diagnostics_revision(&self) -> u64 {
@@ -4353,6 +4357,10 @@ mod tests {
 
     fn apply_pending_hydration(state: &mut AppState) {
         let request = state.pending_hydrations.pop().unwrap();
+        if request.reload_messages {
+            let messages = compute_session_messages(&request.session_file).unwrap();
+            state.apply_session_messages(&request.session_id, &request.session_file, messages);
+        }
         let projection = compute_full_session_projection(&request.session_file).unwrap();
         state.apply_session_hydration(&request.session_id, &request.session_file, projection);
     }
@@ -4469,7 +4477,7 @@ mod tests {
     }
 
     #[test]
-    fn app_state_startup_pages_messages_before_full_projection() {
+    fn app_state_startup_defers_messages_and_full_projection() {
         use threadlane_provider::openai::{ToolCall, ToolCallFunction};
         use threadlane_session::harness::{
             CapabilitySnapshot, OperationIntent, PromptSnapshot, ProviderOutcome, Record,
@@ -4676,8 +4684,12 @@ mod tests {
         assert_eq!(state.active_session_id.as_deref(), Some("hydration-test"));
         assert_eq!(state.active_work_dir.as_deref(), Some(work_dir.as_path()));
         assert!(!state.is_new_task);
-        let messages = &state.messages;
+        assert!(state.messages.is_empty());
+        assert_eq!(state.pending_hydrations.len(), 1);
+        assert!(state.pending_hydrations[0].reload_messages);
 
+        apply_pending_hydration(&mut state);
+        let messages = &state.messages;
         assert_eq!(messages.len(), 2);
         assert_eq!(
             messages[1].reasoning_content.as_deref(),
@@ -4687,9 +4699,6 @@ mod tests {
         assert_eq!(messages[1].tool_activities.len(), 1);
         assert_eq!(messages[1].tool_activities[0].id, "call-read");
         assert_eq!(messages[1].tool_activities[0].detail, "file contents");
-        assert_eq!(state.pending_hydrations.len(), 1);
-
-        apply_pending_hydration(&mut state);
         assert!(
             state.trajectory_by_session[&cached_key(&state, "hydration-test")]
                 .iter()
@@ -5240,6 +5249,30 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_epoch_changes_only_when_entries_are_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut state = AppState::load_from_registry(Vec::new());
+        activate_test_session(&mut state, "session", &path);
+
+        let projection = compute_full_session_projection(&path).unwrap();
+        state.apply_session_hydration("session", &path, projection);
+        assert_eq!(state.trajectory_epoch(), 1);
+
+        state.record_trajectory(
+            "session",
+            &AgentEvent::ToolExecutionStart {
+                tool_call_id: "call-1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            },
+        );
+        assert_eq!(state.trajectory_epoch(), 1);
+        assert_eq!(state.active_trajectory().len(), 1);
+    }
+
+    #[test]
     fn durable_trajectory_hydrates_after_session_switch() {
         use threadlane_session::harness::SessionStore;
 
@@ -5577,11 +5610,13 @@ mod tests {
         let mut state = AppState::load_from_registry(vec![attached_project]);
 
         assert_eq!(state.active_session_id.as_deref(), Some("session_1001"));
+        assert!(state.messages.is_empty());
+
+        apply_pending_hydration(&mut state);
+
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.messages[0].content, "Hello on startup");
         assert_eq!(state.messages[1].content, "I am ready");
-
-        apply_pending_hydration(&mut state);
 
         let trajectory = state
             .trajectory_by_session

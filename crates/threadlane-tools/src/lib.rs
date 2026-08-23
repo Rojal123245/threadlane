@@ -2,12 +2,13 @@ pub mod hashline;
 pub mod search;
 mod virtual_read;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn tool_definitions() -> Vec<Value> {
     vec![
@@ -59,6 +60,51 @@ fn tool_definitions() -> Vec<Value> {
                     }
                 },
                 "required": ["path", "edits"]
+            }
+        }),
+        json!({
+            "name": "edit_files_hashline",
+            "description": "Atomically edit multiple workspace files using hash-anchored operations. Every path and anchor is preflighted before any file changes; overlapping targets and stale anchors abort the whole transaction.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": "Files and their hashline edits to commit as one transaction.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "edits": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "start_anchor": { "type": "string" },
+                                            "end_anchor": { "type": "string" },
+                                            "action": { "type": "string", "enum": ["replace", "insert_after", "delete"] },
+                                            "new_content": { "type": "string" }
+                                        },
+                                        "required": ["start_anchor", "action"]
+                                    }
+                                }
+                            },
+                            "required": ["path", "edits"]
+                        }
+                    }
+                },
+                "required": ["files"]
+            }
+        }),
+        json!({
+            "name": "apply_workspace_edit_plan",
+            "description": "Validate and atomically apply a structured LSP workspace-edit plan against current workspace files. LSP UTF-16 ranges are converted only after all files and ranges preflight successfully.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "object", "description": "The lsp_workspace_edit_plan returned by an LSP semantic tool." }
+                },
+                "required": ["plan"]
             }
         }),
         json!({
@@ -470,6 +516,84 @@ pub fn try_execute_tool_in_workspace(
                 edits.len()
             ))
         }
+        "edit_files_hashline" => {
+            let files = args.get("files").and_then(Value::as_array)
+                .ok_or_else(|| "Error: 'files' parameter is required".to_string())?;
+            if files.is_empty() { return Err("Error: 'files' must not be empty".into()); }
+            struct PlannedFile { raw_path: String, path: PathBuf, original: String, result: hashline::HashlineApplyResult }
+            let mut planned = Vec::with_capacity(files.len());
+            let mut seen = std::collections::HashSet::new();
+            for file in files {
+                let raw_path = file.get("path").and_then(Value::as_str)
+                    .ok_or_else(|| "Error: every file requires 'path'".to_string())?;
+                let path = validate_path_in_workspace(raw_path, workspace_root)?;
+                if !seen.insert(path.clone()) { return Err(format!("Error: duplicate transaction path '{raw_path}'")); }
+                let edits: Vec<hashline::HashlineEdit> = serde_json::from_value(
+                    file.get("edits").cloned().ok_or_else(|| format!("Error: '{raw_path}' requires 'edits'"))?
+                ).map_err(|error| format!("Error parsing edits for '{raw_path}': {error}"))?;
+                let original = fs::read_to_string(&path)
+                    .map_err(|error| format!("Error reading file '{raw_path}': {error}"))?;
+                let result = hashline::apply_hashline_edits_detailed(&original, &edits, 5)
+                    .map_err(|error| format!("Error preflighting '{raw_path}': {error}"))?;
+                planned.push(PlannedFile { raw_path: raw_path.into(), path, original, result });
+            }
+            let transaction = planned.iter().map(|item| (
+                item.raw_path.clone(), item.path.clone(), item.original.clone(), item.result.new_content.clone()
+            )).collect::<Vec<_>>();
+            commit_text_transaction(&transaction)?;
+            let details = planned.iter().map(|item| format!(
+                "{}\nDiff:\n{}\nUpdated Line Hashes:\n{}",
+                item.raw_path, item.result.diff, item.result.updated_context
+            )).collect::<Vec<_>>().join("\n\n");
+            Ok(format!("Successfully committed {} files atomically.\n\n{details}", planned.len()))
+        }
+        "apply_workspace_edit_plan" => {
+            fn offset(text: &str, line: u64, character: u64) -> Result<usize, String> {
+                let start = text.split_inclusive('\n').take(line as usize).map(str::len).sum::<usize>();
+                let current = text.get(start..).ok_or("line is outside the document")?;
+                let mut units = 0usize;
+                for (byte, ch) in current.char_indices() {
+                    if ch == '\n' || units == character as usize { return Ok(start + byte); }
+                    units += ch.len_utf16();
+                    if units > character as usize { return Err("character splits a UTF-16 code point".into()); }
+                }
+                if units == character as usize { Ok(text.len()) } else { Err("character is outside the line".into()) }
+            }
+            fn apply(text: &str, edits: &Value) -> Result<String, String> {
+                let mut ranges = Vec::new();
+                for edit in edits.as_array().ok_or("text_edits must be an array")? {
+                    let range = edit.get("range").ok_or("text edit is missing range")?;
+                    let pos = |key: &str| -> Result<usize, String> {
+                        let value = range.get(key).ok_or_else(|| format!("range.{key} is missing"))?;
+                        offset(text, value.get("line").and_then(Value::as_u64).ok_or("line is missing")?, value.get("character").and_then(Value::as_u64).ok_or("character is missing")?)
+                    };
+                    let start = pos("start")?;
+                    let end = pos("end")?;
+                    if start > end { return Err("text edit range is reversed".into()); }
+                    ranges.push((start, end, edit.get("newText").and_then(Value::as_str).unwrap_or("").to_owned()));
+                }
+                ranges.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
+                for pair in ranges.windows(2) { if pair[1].1 > pair[0].0 { return Err("text edit ranges overlap".into()); } }
+                let mut output = text.to_owned();
+                for (start, end, replacement) in ranges { output.replace_range(start..end, &replacement); }
+                Ok(output)
+            }
+            let plan = args.get("plan").ok_or("Error: 'plan' parameter is required")?;
+            if plan.get("kind").and_then(Value::as_str) != Some("lsp_workspace_edit_plan") { return Err("Error: unsupported workspace edit plan kind".into()); }
+            let files = plan.get("files").and_then(Value::as_array).ok_or("Error: plan.files must be an array")?;
+            let mut planned = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for file in files {
+                let raw_path = file.get("path").and_then(Value::as_str).ok_or("Error: plan file path is required")?;
+                let path = validate_path_in_workspace(raw_path, workspace_root)?;
+                if !seen.insert(path.clone()) { return Err(format!("Error: duplicate plan path '{raw_path}'")); }
+                let original = fs::read_to_string(&path).map_err(|error| format!("Error reading '{raw_path}': {error}"))?;
+                let updated = apply(&original, file.get("text_edits").unwrap_or(&Value::Null)).map_err(|error| format!("Error preflighting '{raw_path}': {error}"))?;
+                planned.push((raw_path.to_owned(), path, original, updated));
+            }
+            commit_text_transaction(&planned)?;
+            Ok(format!("Successfully applied workspace edit plan to {} files atomically.", planned.len()))
+        }
         "list_dir" => {
             let raw_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             let validated_path = validate_path_in_workspace(raw_path, workspace_root)?;
@@ -826,6 +950,82 @@ fn path_matches(file_name: &str, target_path: &str) -> bool {
     false
 }
 
+fn commit_text_transaction(files: &[(String, PathBuf, String, String)]) -> Result<(), String> {
+    use std::io::Write;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let mut staged = Vec::with_capacity(files.len());
+    for (index, (raw_path, path, original, updated)) in files.iter().enumerate() {
+        let current = fs::read_to_string(path)
+            .map_err(|error| format!("Error re-reading '{raw_path}': {error}"))?;
+        if &current != original {
+            for (stage, _) in &staged {
+                let _ = fs::remove_file(stage);
+            }
+            return Err(format!(
+                "Error: '{raw_path}' changed after preflight; transaction aborted"
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("Invalid path '{raw_path}'"))?;
+        let stem = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let stage = parent.join(format!(".{stem}.threadlane-{nonce}-{index}.stage"));
+        let backup = parent.join(format!(".{stem}.threadlane-{nonce}-{index}.backup"));
+        let mut handle = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stage)
+            .map_err(|error| format!("Error staging '{raw_path}': {error}"))?;
+        handle
+            .write_all(updated.as_bytes())
+            .map_err(|error| format!("Error staging '{raw_path}': {error}"))?;
+        handle
+            .sync_all()
+            .map_err(|error| format!("Error syncing '{raw_path}': {error}"))?;
+        fs::set_permissions(
+            &stage,
+            fs::metadata(path)
+                .map_err(|error| error.to_string())?
+                .permissions(),
+        )
+        .map_err(|error| format!("Error preserving permissions for '{raw_path}': {error}"))?;
+        staged.push((stage, backup));
+    }
+    let mut committed: Vec<usize> = Vec::new();
+    for (index, ((raw_path, path, _, _), (stage, backup))) in
+        files.iter().zip(staged.iter()).enumerate()
+    {
+        if let Err(error) = fs::rename(path, backup).and_then(|_| fs::rename(stage, path)) {
+            if !path.exists() && backup.exists() {
+                let _ = fs::rename(backup, path);
+            }
+            for old in committed.into_iter().rev() {
+                let (_, old_path, _, _) = &files[old];
+                let (_, old_backup) = &staged[old];
+                let _ = fs::remove_file(old_path);
+                let _ = fs::rename(old_backup, old_path);
+            }
+            for (pending_stage, _) in &staged[index..] {
+                let _ = fs::remove_file(pending_stage);
+            }
+            return Err(format!(
+                "Error committing '{raw_path}': {error}; transaction rolled back"
+            ));
+        }
+        committed.push(index);
+    }
+    for (_, backup) in staged {
+        let _ = fs::remove_file(backup);
+    }
+    Ok(())
+}
+
 fn run_post_edit_diagnostics(workspace_root: &Path, raw_path: &str) -> String {
     if !raw_path.ends_with(".rs") {
         return String::new();
@@ -1052,6 +1252,109 @@ mod tests {
         assert_eq!(wrapped, typed);
     }
     #[test]
+    fn edit_files_hashline_is_atomic_on_stale_anchor() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "three\nfour\n").unwrap();
+        let a_anchor = hashline::format_line_hashline(1, "one")
+            .split('|')
+            .next()
+            .unwrap()
+            .to_string();
+        let args = serde_json::json!({"files": [
+            {"path":"a.txt","edits":[{"start_anchor":a_anchor,"action":"replace","new_content":"changed"}]},
+            {"path":"b.txt","edits":[{"start_anchor":"1:bad","action":"replace","new_content":"broken"}]}
+        ]});
+        let result =
+            try_execute_tool_in_workspace("edit_files_hashline", &args.to_string(), dir.path());
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "three\nfour\n"
+        );
+    }
+
+    #[test]
+    fn edit_files_hashline_commits_all_files() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+        let anchor = |line: &str| {
+            hashline::format_line_hashline(1, line)
+                .split('|')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let args = serde_json::json!({"files": [
+            {"path":"a.txt","edits":[{"start_anchor":anchor("one"),"action":"replace","new_content":"first"}]},
+            {"path":"b.txt","edits":[{"start_anchor":anchor("two"),"action":"replace","new_content":"second"}]}
+        ]});
+        try_execute_tool_in_workspace("edit_files_hashline", &args.to_string(), dir.path())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "second\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_edit_plan_handles_utf16_and_is_atomic() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "let rocket = \"🚀\";\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "rocket();\n").unwrap();
+        let plan = serde_json::json!({"kind":"lsp_workspace_edit_plan","version":1,"files":[
+            {"path":"a.rs","text_edits":[{"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":10}},"newText":"ship"}]},
+            {"path":"b.rs","text_edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}},"newText":"ship"}]}
+        ]});
+        try_execute_tool_in_workspace(
+            "apply_workspace_edit_plan",
+            &serde_json::json!({"plan":plan}).to_string(),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
+            "let ship = \"🚀\";\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.rs")).unwrap(),
+            "ship();\n"
+        );
+    }
+
+    #[test]
+    fn apply_workspace_edit_plan_preflights_every_file() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "old\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "old\n").unwrap();
+        let plan = serde_json::json!({"kind":"lsp_workspace_edit_plan","files":[
+            {"path":"a.rs","text_edits":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"new"}]},
+            {"path":"b.rs","text_edits":[{"range":{"start":{"line":9,"character":0},"end":{"line":9,"character":1}},"newText":"bad"}]}
+        ]});
+        assert!(
+            try_execute_tool_in_workspace(
+                "apply_workspace_edit_plan",
+                &serde_json::json!({"plan":plan}).to_string(),
+                dir.path()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
+            "old\n"
+        );
+    }
+
+    #[test]
     fn test_edit_file_hashline_schema_description() {
         let tools = get_available_tools();
         let hashline_tool = tools
@@ -1066,10 +1369,10 @@ mod tests {
         assert!(desc.contains("Always batch multiple edits for the same file in one tool call"));
 
         let params = &hashline_tool["function"]["parameters"]["properties"];
-        let start_anchor_desc = params["edits"]["items"]["properties"]["start_anchor"]
-            ["description"]
-            .as_str()
-            .unwrap();
+        let start_anchor_desc =
+            params["edits"]["items"]["properties"]["start_anchor"]["description"]
+                .as_str()
+                .unwrap();
         assert!(start_anchor_desc.contains("formatted as 'line_number:hash'"));
 
         let end_anchor_desc = params["edits"]["items"]["properties"]["end_anchor"]["description"]

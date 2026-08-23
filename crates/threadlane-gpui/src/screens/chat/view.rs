@@ -318,15 +318,37 @@ fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
     serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
 }
 
+#[cfg(test)]
 fn reconcile_trajectory_entries(
-    mut cached: Vec<TrajectoryEntry>,
+    cached: Vec<TrajectoryEntry>,
     source: &[TrajectoryEntry],
 ) -> Vec<TrajectoryEntry> {
+    reconcile_trajectory_entries_with_append(cached, source).0
+}
+
+fn reconcile_trajectory_entries_with_append(
+    mut cached: Vec<TrajectoryEntry>,
+    source: &[TrajectoryEntry],
+) -> (Vec<TrajectoryEntry>, bool) {
     if source.starts_with(&cached) {
         cached.extend_from_slice(&source[cached.len()..]);
-        cached
+        (cached, true)
     } else {
-        source.to_vec()
+        (source.to_vec(), false)
+    }
+}
+
+fn reconcile_trajectory_entries_by_epoch(
+    mut cached: Vec<TrajectoryEntry>,
+    source: &[TrajectoryEntry],
+    cached_epoch: u64,
+    source_epoch: u64,
+) -> (Vec<TrajectoryEntry>, bool) {
+    if cached_epoch == source_epoch && source.len() >= cached.len() {
+        cached.extend_from_slice(&source[cached.len()..]);
+        (cached, true)
+    } else {
+        reconcile_trajectory_entries_with_append(cached, source)
     }
 }
 
@@ -346,10 +368,64 @@ fn contains_case_insensitive(haystack: &str, lowercase_query: &str) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryCacheKey {
     revision: u64,
+    epoch: u64,
     mode: TrajectoryMode,
     query: String,
     category: Option<String>,
     lane: Option<String>,
+}
+
+fn extend_trajectory_facets(
+    categories: &mut Vec<String>,
+    lane_latest: &mut std::collections::BTreeMap<String, String>,
+    filtered_indices: &mut Vec<usize>,
+    entries: &[TrajectoryEntry],
+    start: usize,
+    key: &TrajectoryCacheKey,
+) {
+    for (index, entry) in entries.iter().enumerate().skip(start) {
+        if let Err(position) = categories.binary_search(&entry.category) {
+            categories.insert(position, entry.category.clone());
+        }
+        if let Some(lane) = &entry.lane {
+            lane_latest.insert(lane.clone(), entry.summary.clone());
+        }
+        let matches = key
+            .category
+            .as_ref()
+            .is_none_or(|category| &entry.category == category)
+            && key
+                .lane
+                .as_ref()
+                .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+            && [
+                entry.category.as_str(),
+                entry.summary.as_str(),
+                entry.detail.as_str(),
+                entry.lane.as_deref().unwrap_or(""),
+                entry.correlation_id.as_deref().unwrap_or(""),
+            ]
+            .iter()
+            .any(|value| contains_case_insensitive(value, &key.query));
+        if matches {
+            filtered_indices.push(index);
+        }
+    }
+}
+
+fn extend_trajectory_previews(
+    previews: &mut Vec<SharedString>,
+    entries: &[TrajectoryEntry],
+    start: usize,
+) {
+    previews.reserve(entries.len().saturating_sub(start));
+    previews.extend(entries[start..].iter().map(|entry| {
+        if entry.detail.trim().is_empty() {
+            entry.summary.clone().into()
+        } else {
+            format!("{}  {}", entry.summary, entry.detail.replace('\n', " ")).into()
+        }
+    }));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -366,10 +442,26 @@ fn build_trajectory_rows(
     mode: TrajectoryMode,
 ) -> Vec<TrajectoryRow> {
     let mut rows = Vec::with_capacity(filtered_indices.len());
-    let mut previous_turn = None;
-    let mut previous_request = None;
-    let mut request_input_seen = false;
-    for &all_index in filtered_indices {
+    extend_trajectory_rows(&mut rows, all_entries, filtered_indices, 0, mode);
+    rows
+}
+
+fn extend_trajectory_rows(
+    rows: &mut Vec<TrajectoryRow>,
+    all_entries: &[TrajectoryEntry],
+    filtered_indices: &[usize],
+    start: usize,
+    mode: TrajectoryMode,
+) {
+    let previous = start
+        .checked_sub(1)
+        .and_then(|index| filtered_indices.get(index))
+        .map(|&index| &all_entries[index]);
+    let mut previous_turn = previous.and_then(|entry| entry.turn);
+    let mut previous_request = previous.and_then(|entry| entry.request);
+    let mut request_input_seen = previous_request.is_some();
+    rows.reserve(filtered_indices.len().saturating_sub(start));
+    for &all_index in &filtered_indices[start..] {
         let entry = &all_entries[all_index];
         if mode == TrajectoryMode::Requests && entry.request != previous_request {
             if let Some(request) = entry.request {
@@ -392,12 +484,12 @@ fn build_trajectory_rows(
         }
         rows.push(TrajectoryRow::Entry(all_index));
     }
-    rows
 }
 
 #[derive(Default)]
 struct TrajectorySummary {
     overview_positions: [HashSet<usize>; 3],
+    overview_prefix: [Vec<u32>; 3],
     tool_count: usize,
     total_duration_ms: u64,
     anomaly_count: usize,
@@ -406,24 +498,32 @@ struct TrajectorySummary {
 
 fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
     let mut summary = TrajectorySummary::default();
-    for (index, entry) in entries.iter().enumerate() {
-        let position = index * 48 / entries.len().max(1);
-        if matches!(
-            entry.category.as_str(),
-            "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
-        ) {
-            summary.overview_positions[0].insert(position);
+    extend_trajectory_summary(&mut summary, entries);
+    summary
+}
+
+fn extend_trajectory_summary(summary: &mut TrajectorySummary, entries: &[TrajectoryEntry]) {
+    for prefix in &mut summary.overview_prefix {
+        if prefix.is_empty() {
+            prefix.push(0);
         }
-        if matches!(
-            entry.category.as_str(),
-            "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
-        ) {
-            summary.overview_positions[1].insert(position);
+    }
+    for entry in entries {
+        let groups = [
+            matches!(
+                entry.category.as_str(),
+                "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
+            ),
+            matches!(
+                entry.category.as_str(),
+                "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
+            ),
+            matches!(entry.category.as_str(), "Tool" | "Tool runtime"),
+        ];
+        for (prefix, present) in summary.overview_prefix.iter_mut().zip(groups) {
+            prefix.push(prefix.last().copied().unwrap_or_default() + u32::from(present));
         }
-        if matches!(entry.category.as_str(), "Tool" | "Tool runtime") {
-            summary.overview_positions[2].insert(position);
-            summary.tool_count += 1;
-        }
+        summary.tool_count += usize::from(groups[2]);
         summary.total_duration_ms = summary
             .total_duration_ms
             .saturating_add(entry.diagnostics.duration_ms.unwrap_or_default());
@@ -431,7 +531,21 @@ fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
             usize::from(entry.diagnostics.is_anomaly || entry.category == "Anomaly");
         summary.max_turn = summary.max_turn.max(entry.turn.unwrap_or_default());
     }
-    summary
+    let entry_count = summary.overview_prefix[0].len().saturating_sub(1);
+    for (positions, prefix) in summary
+        .overview_positions
+        .iter_mut()
+        .zip(&summary.overview_prefix)
+    {
+        positions.clear();
+        for position in 0..48 {
+            let start = (position * entry_count).div_ceil(48);
+            let end = ((position + 1) * entry_count).div_ceil(48);
+            if prefix[end] > prefix[start] {
+                positions.insert(position);
+            }
+        }
+    }
 }
 
 struct TrajectoryRenderCache {
@@ -441,6 +555,7 @@ struct TrajectoryRenderCache {
     lanes: Arc<Vec<String>>,
     lane_latest: Arc<std::collections::BTreeMap<String, String>>,
     filtered_indices: Vec<usize>,
+    previews: Vec<SharedString>,
     rows: Vec<TrajectoryRow>,
     summary: TrajectorySummary,
 }
@@ -614,10 +729,8 @@ impl ChatListView {
                     });
 
                 if changed {
-                    // Markdown measurement and new rows can complete after the first redraw.
-                    settle_frames = 6;
+                    settle_frames = 1;
                 }
-
                 if !changed && settle_frames > 0 {
                     let _ = this.update(cx, |_this, cx| cx.notify());
                     settle_frames = settle_frames.saturating_sub(1);
@@ -993,11 +1106,11 @@ impl ChatListView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let (marker, marker_color, is_active) = match activity.category.as_str() {
-            "Error" => ("!", theme.danger, false),
-            "Working" | "Thinking" => ("◌", theme.primary, true),
-            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success, false),
-            _ => ("✓", theme.muted_foreground, false),
+        let (marker, marker_color) = match activity.category.as_str() {
+            "Error" => ("!", theme.danger),
+            "Working" | "Thinking" => ("◌", theme.primary),
+            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success),
+            _ => ("✓", theme.muted_foreground),
         };
         let model = self.model.clone();
         let tool_call_id = activity.id.clone();
@@ -1042,23 +1155,7 @@ impl ChatListView {
                             .font_weight(FontWeight::BOLD)
                             .text_color(marker_color)
                             .child(marker);
-                        if is_active {
-                            marker_el
-                                .with_animation(
-                                    SharedString::from(format!("tool-pulse-{}", activity.id)),
-                                    Animation::new(Duration::from_millis(1000))
-                                        .repeat()
-                                        .with_easing(ease_in_out),
-                                    |el, delta| {
-                                        el.opacity(
-                                            0.3 + 0.7 * (delta * std::f32::consts::PI).sin().abs(),
-                                        )
-                                    },
-                                )
-                                .into_any_element()
-                        } else {
-                            marker_el.into_any_element()
-                        }
+                        marker_el.into_any_element()
                     })
                     .child(
                         div()
@@ -1180,17 +1277,6 @@ impl ChatListView {
                             .flex()
                             .items_center()
                             .gap(px(3.0))
-                            .with_animation(
-                                SharedString::from("working-wave-dots"),
-                                Animation::new(Duration::from_millis(1200))
-                                    .repeat()
-                                    .with_easing(ease_in_out),
-                                |el, delta| {
-                                    let opacity =
-                                        0.35 + 0.65 * (delta * std::f32::consts::PI).sin().abs();
-                                    el.opacity(opacity)
-                                },
-                            )
                             .child(div().size(px(4.5)).rounded_full().bg(theme.primary))
                             .child(div().size(px(4.5)).rounded_full().bg(theme.primary))
                             .child(div().size(px(4.5)).rounded_full().bg(theme.primary)),
@@ -1265,11 +1351,12 @@ impl ChatListView {
                     .expect("trajectory cache")
                     .all_entries[all_index];
                 let selected = Some(all_index) == self.selected_trajectory_index;
-                let preview = if entry.detail.trim().is_empty() {
-                    entry.summary.clone()
-                } else {
-                    format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
-                };
+                let preview = self
+                    .trajectory_cache
+                    .as_ref()
+                    .expect("trajectory cache")
+                    .previews[all_index]
+                    .clone();
                 let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
                     match entry.category.as_str() {
                         "Tool" | "Tool runtime" => {
@@ -1428,16 +1515,21 @@ impl ChatListView {
     }
 
     fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let revision = match self.trajectory_mode {
+        let (revision, epoch) = match self.trajectory_mode {
             TrajectoryMode::Execution | TrajectoryMode::Requests => {
-                self.model.read(cx).trajectory_revision()
+                let state = self.model.read(cx);
+                (state.trajectory_revision(), state.trajectory_epoch())
             }
             TrajectoryMode::ModelContext
             | TrajectoryMode::DurableEvents
-            | TrajectoryMode::Recovery => self.model.read(cx).diagnostics_revision(),
+            | TrajectoryMode::Recovery => {
+                let revision = self.model.read(cx).diagnostics_revision();
+                (revision, revision)
+            }
         };
         let key = TrajectoryCacheKey {
             revision,
+            epoch,
             mode: self.trajectory_mode,
             query: self.trajectory_search.to_lowercase(),
             category: self.trajectory_category.clone(),
@@ -1448,75 +1540,152 @@ impl ChatListView {
             .as_ref()
             .is_none_or(|cache| cache.key != key)
         {
+            let cached_len = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(0, |cache| cache.all_entries.len());
+            let cached_filtered_len = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(0, |cache| cache.filtered_indices.len());
+            let projection_matches = self.trajectory_cache.as_ref().is_some_and(|cache| {
+                cache.key.epoch == key.epoch
+                    && cache.key.mode == key.mode
+                    && cache.key.query == key.query
+                    && cache.key.category == key.category
+                    && cache.key.lane == key.lane
+            });
+            let mut cached_summary = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.summary))
+                .unwrap_or_default();
+            let mut cached_categories = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.categories))
+                .unwrap_or_default();
+            let mut cached_lane_latest = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.lane_latest))
+                .unwrap_or_default();
+            let mut cached_filtered_indices = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.filtered_indices))
+                .unwrap_or_default();
+            let mut cached_previews = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.previews))
+                .unwrap_or_default();
             let cached_entries = self
                 .trajectory_cache
                 .as_mut()
                 .map(|cache| std::mem::take(&mut cache.all_entries))
                 .unwrap_or_default();
-            let all_entries = match self.trajectory_mode {
+            let cached_epoch = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(epoch, |cache| cache.key.epoch);
+            let (all_entries, appended) = match self.trajectory_mode {
                 TrajectoryMode::Execution | TrajectoryMode::Requests => {
                     let state = self.model.read(cx);
-                    reconcile_trajectory_entries(cached_entries, state.active_trajectory())
+                    reconcile_trajectory_entries_by_epoch(
+                        cached_entries,
+                        state.active_trajectory(),
+                        cached_epoch,
+                        epoch,
+                    )
                 }
                 TrajectoryMode::ModelContext => {
                     let source = self.model.read(cx).active_model_context_diagnostics();
-                    reconcile_trajectory_entries(cached_entries, &source)
+                    reconcile_trajectory_entries_with_append(cached_entries, &source)
                 }
                 TrajectoryMode::DurableEvents => {
                     let source = self.model.read(cx).active_durable_event_diagnostics();
-                    reconcile_trajectory_entries(cached_entries, &source)
+                    reconcile_trajectory_entries_with_append(cached_entries, &source)
                 }
                 TrajectoryMode::Recovery => {
                     let source = self.model.read(cx).active_recovery_diagnostics();
-                    reconcile_trajectory_entries(cached_entries, &source)
+                    reconcile_trajectory_entries_with_append(cached_entries, &source)
                 }
             };
-            let mut categories = all_entries
-                .iter()
-                .map(|entry| entry.category.clone())
-                .collect::<Vec<_>>();
-            categories.sort();
-            categories.dedup();
-            let mut lane_latest = std::collections::BTreeMap::new();
-            for entry in &all_entries {
-                if let Some(lane) = &entry.lane {
-                    lane_latest.insert(lane.clone(), entry.summary.clone());
-                }
-            }
-            let lanes = lane_latest.keys().cloned().collect();
-            let filtered_indices = all_entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    key.category
-                        .as_ref()
-                        .is_none_or(|category| &entry.category == category)
-                        && key
-                            .lane
-                            .as_ref()
-                            .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-                        && [
-                            entry.category.as_str(),
-                            entry.summary.as_str(),
-                            entry.detail.as_str(),
-                            entry.lane.as_deref().unwrap_or(""),
-                            entry.correlation_id.as_deref().unwrap_or(""),
-                        ]
-                        .iter()
-                        .any(|value| contains_case_insensitive(value, &key.query))
-                })
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let rows = build_trajectory_rows(&all_entries, &filtered_indices, self.trajectory_mode);
-            let summary = summarize_trajectory(&all_entries);
+            let (categories, lane_latest, filtered_indices) = if projection_matches && appended {
+                extend_trajectory_facets(
+                    Arc::make_mut(&mut cached_categories),
+                    Arc::make_mut(&mut cached_lane_latest),
+                    &mut cached_filtered_indices,
+                    &all_entries,
+                    cached_len,
+                    &key,
+                );
+                (
+                    cached_categories,
+                    cached_lane_latest,
+                    cached_filtered_indices,
+                )
+            } else {
+                let mut categories = Vec::new();
+                let mut lane_latest = std::collections::BTreeMap::new();
+                let mut filtered_indices = Vec::new();
+                extend_trajectory_facets(
+                    &mut categories,
+                    &mut lane_latest,
+                    &mut filtered_indices,
+                    &all_entries,
+                    0,
+                    &key,
+                );
+                (
+                    Arc::new(categories),
+                    Arc::new(lane_latest),
+                    filtered_indices,
+                )
+            };
+            let lanes = Arc::new(lane_latest.keys().cloned().collect());
+            let previews = if projection_matches && appended {
+                extend_trajectory_previews(&mut cached_previews, &all_entries, cached_len);
+                cached_previews
+            } else {
+                let mut previews = Vec::with_capacity(all_entries.len());
+                extend_trajectory_previews(&mut previews, &all_entries, 0);
+                previews
+            };
+            let (rows, extends_previous) = if projection_matches && appended {
+                let mut rows = self
+                    .trajectory_cache
+                    .as_mut()
+                    .map(|cache| std::mem::take(&mut cache.rows))
+                    .unwrap_or_default();
+                extend_trajectory_rows(
+                    &mut rows,
+                    &all_entries,
+                    &filtered_indices,
+                    cached_filtered_len,
+                    self.trajectory_mode,
+                );
+                (rows, true)
+            } else {
+                let rows =
+                    build_trajectory_rows(&all_entries, &filtered_indices, self.trajectory_mode);
+                let extends_previous = self
+                    .trajectory_cache
+                    .as_ref()
+                    .is_some_and(|cache| rows.starts_with(&cache.rows));
+                (rows, extends_previous)
+            };
+            let summary = if projection_matches && appended {
+                extend_trajectory_summary(&mut cached_summary, &all_entries[cached_len..]);
+                cached_summary
+            } else {
+                summarize_trajectory(&all_entries)
+            };
             let previous_row_count = self
                 .trajectory_cache
                 .as_ref()
                 .map_or(0, |cache| cache.rows.len());
-            let extends_previous = self
-                .trajectory_cache
-                .as_ref()
-                .is_some_and(|cache| rows.starts_with(&cache.rows));
             if extends_previous {
                 self.trajectory_list_state.splice(
                     previous_row_count..previous_row_count,
@@ -1529,10 +1698,11 @@ impl ChatListView {
             self.trajectory_cache = Some(TrajectoryRenderCache {
                 key,
                 all_entries,
-                categories: Arc::new(categories),
-                lanes: Arc::new(lanes),
-                lane_latest: Arc::new(lane_latest),
+                categories,
+                lanes,
+                lane_latest,
                 filtered_indices,
+                previews,
                 rows,
                 summary,
             });
@@ -2379,29 +2549,15 @@ impl ChatListView {
         let model = self.model.clone();
         let msg_id = msg.id.clone();
 
-        let icon_element = if is_streaming {
-            div()
-                .text_xs()
-                .text_color(theme.primary)
-                .with_animation(
-                    SharedString::from(format!("reasoning-pulse-{}", msg.id)),
-                    Animation::new(Duration::from_millis(1200))
-                        .repeat()
-                        .with_easing(ease_in_out),
-                    |el, delta| {
-                        let opacity = 0.4 + 0.6 * (delta * std::f32::consts::PI).sin().abs();
-                        el.opacity(opacity)
-                    },
-                )
-                .child("✦")
-                .into_any_element()
-        } else {
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("✦")
-                .into_any_element()
-        };
+        let icon_element = div()
+            .text_xs()
+            .text_color(if is_streaming {
+                theme.primary
+            } else {
+                theme.muted_foreground
+            })
+            .child("✦")
+            .into_any_element();
 
         let header = div()
             .id(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
@@ -2461,11 +2617,15 @@ impl ChatListView {
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .overflow_y_scrollbar();
-            let markdown_state =
-                self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
-            container
-                .child(TextView::new(&markdown_state).selectable(true))
-                .into_any_element()
+            if is_streaming {
+                container.child(reasoning.to_owned()).into_any_element()
+            } else {
+                let markdown_state =
+                    self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
+                container
+                    .child(TextView::new(&markdown_state).selectable(true))
+                    .into_any_element()
+            }
         });
 
         Some(
@@ -2544,26 +2704,15 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let markdown_state =
-                                    self.markdown_state(msg.id.clone(), &msg.content, cx);
-                                let content_element = div()
-                                    .w_full()
-                                    .text_sm()
-                                    .text_color(theme.foreground)
-                                    .child(self.chat_markdown_view(&markdown_state))
-                                    .into_any_element();
-
+                                let content = div().w_full().text_sm().text_color(theme.foreground);
                                 Some(if msg.streaming {
-                                    div()
-                                        .child(content_element)
-                                        .with_animation(
-                                            SharedString::from(format!("stream-text-{}", msg.id)),
-                                            Animation::new(Duration::from_millis(150)),
-                                            |el, delta| el.opacity(0.85 + 0.15 * delta),
-                                        )
-                                        .into_any_element()
+                                    content.child(msg.content.clone()).into_any_element()
                                 } else {
-                                    content_element.into_any_element()
+                                    let markdown_state =
+                                        self.markdown_state(msg.id.clone(), &msg.content, cx);
+                                    content
+                                        .child(self.chat_markdown_view(&markdown_state))
+                                        .into_any_element()
                                 })
                             } else {
                                 None
@@ -4314,8 +4463,10 @@ mod hot_path_tests {
         ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
         TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, build_trajectory_rows,
         build_transcript_rows, classify_chat_link, classify_markdown_update,
-        contains_case_insensitive, context_meter_view_model, format_trajectory_raw_json,
-        grouped_tool_activities, reconcile_trajectory_entries, summarize_trajectory,
+        contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
+        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
+        format_trajectory_raw_json, grouped_tool_activities, reconcile_trajectory_entries,
+        reconcile_trajectory_entries_by_epoch, summarize_trajectory,
     };
     use crate::state::{
         ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
@@ -4671,6 +4822,92 @@ mod hot_path_tests {
     }
 
     #[test]
+    fn trajectory_epoch_distinguishes_append_from_replacement() {
+        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let appended_source = vec![
+            cached[0].clone(),
+            trajectory_entry("Tool", Some(1), Some(1)),
+        ];
+        let (entries, appended) =
+            reconcile_trajectory_entries_by_epoch(cached.clone(), &appended_source, 7, 7);
+        assert!(appended);
+        assert_eq!(entries, appended_source);
+
+        let replacement = vec![trajectory_entry("Assistant", Some(1), Some(1))];
+        let (entries, appended) = reconcile_trajectory_entries_by_epoch(cached, &replacement, 7, 8);
+        assert!(!appended);
+        assert_eq!(entries, replacement);
+    }
+
+    #[test]
+    fn trajectory_incremental_facets_match_full_rebuild() {
+        let mut input = trajectory_entry("Input", Some(1), Some(1));
+        input.lane = Some("main".into());
+        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
+        tool.lane = Some("main".into());
+        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(2));
+        anomaly.lane = Some("child".into());
+        let appended_tool = trajectory_entry("Tool", Some(1), Some(2));
+        let entries = vec![input, tool, anomaly, appended_tool];
+        let key = TrajectoryCacheKey {
+            revision: 4,
+            epoch: 1,
+            mode: TrajectoryMode::Execution,
+            query: "tool".into(),
+            category: None,
+            lane: None,
+        };
+
+        let mut incremental = (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
+        extend_trajectory_facets(
+            &mut incremental.0,
+            &mut incremental.1,
+            &mut incremental.2,
+            &entries[..2],
+            0,
+            &key,
+        );
+        extend_trajectory_facets(
+            &mut incremental.0,
+            &mut incremental.1,
+            &mut incremental.2,
+            &entries,
+            2,
+            &key,
+        );
+
+        let mut rebuilt = (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
+        extend_trajectory_facets(
+            &mut rebuilt.0,
+            &mut rebuilt.1,
+            &mut rebuilt.2,
+            &entries,
+            0,
+            &key,
+        );
+        assert_eq!(incremental, rebuilt);
+        assert_eq!(incremental.0, vec!["Anomaly", "Input", "Tool"]);
+        assert_eq!(incremental.2, vec![1, 3]);
+    }
+
+    #[test]
+    fn trajectory_previews_extend_without_reformatting_existing_entries() {
+        let mut input = trajectory_entry("Input", Some(1), Some(1));
+        input.summary = "Prompt".into();
+        input.detail = "first\nsecond".into();
+        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
+        tool.summary = "read_file".into();
+        tool.detail.clear();
+        let entries = vec![input, tool];
+        let mut previews = Vec::new();
+
+        extend_trajectory_previews(&mut previews, &entries[..1], 0);
+        extend_trajectory_previews(&mut previews, &entries, 1);
+
+        assert_eq!(previews, ["Prompt  first second", "read_file"]);
+    }
+
+    #[test]
     fn trajectory_rows_preserve_request_headers_and_setup_boundaries() {
         let entries = vec![
             trajectory_entry("Provider", Some(1), Some(1)),
@@ -4692,6 +4929,36 @@ mod hot_path_tests {
     }
 
     #[test]
+    fn trajectory_incremental_rows_match_full_rebuild() {
+        let entries = vec![
+            trajectory_entry("Provider", Some(1), Some(1)),
+            trajectory_entry("Input", Some(1), Some(1)),
+            trajectory_entry("Input", Some(2), Some(2)),
+        ];
+        let indices = [0, 1, 2];
+        let mut incremental = Vec::new();
+        extend_trajectory_rows(
+            &mut incremental,
+            &entries,
+            &indices[..2],
+            0,
+            TrajectoryMode::Requests,
+        );
+        extend_trajectory_rows(
+            &mut incremental,
+            &entries,
+            &indices,
+            2,
+            TrajectoryMode::Requests,
+        );
+
+        assert_eq!(
+            incremental,
+            build_trajectory_rows(&entries, &indices, TrajectoryMode::Requests)
+        );
+    }
+
+    #[test]
     fn trajectory_summary_is_computed_once_from_canonical_entries() {
         let mut tool = trajectory_entry("Tool", Some(1), Some(3));
         tool.diagnostics.duration_ms = Some(25);
@@ -4706,10 +4973,31 @@ mod hot_path_tests {
         assert_eq!(summary.anomaly_count, 1);
         assert_eq!(summary.max_turn, 4);
     }
+
+    #[test]
+    fn trajectory_summary_append_matches_full_rebuild() {
+        let initial = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
+        tool.diagnostics.duration_ms = Some(25);
+        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(2));
+        anomaly.diagnostics.duration_ms = Some(75);
+        let appended = vec![tool, anomaly];
+        let mut incremental = summarize_trajectory(&initial);
+        extend_trajectory_summary(&mut incremental, &appended);
+
+        let rebuilt =
+            summarize_trajectory(&initial.into_iter().chain(appended).collect::<Vec<_>>());
+        assert_eq!(incremental.overview_positions, rebuilt.overview_positions);
+        assert_eq!(incremental.tool_count, rebuilt.tool_count);
+        assert_eq!(incremental.total_duration_ms, 100);
+        assert_eq!(incremental.anomaly_count, rebuilt.anomaly_count);
+        assert_eq!(incremental.max_turn, rebuilt.max_turn);
+    }
     #[test]
     fn trajectory_cache_key_changes_with_data_or_filter() {
         let base = TrajectoryCacheKey {
             revision: 7,
+            epoch: 2,
             mode: TrajectoryMode::Execution,
             query: "tool".into(),
             category: None,

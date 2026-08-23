@@ -472,7 +472,14 @@ pub fn extension_before_tool_hook_handler(
             if policy == ToolPolicy::ReadOnly
                 && matches!(
                     tool_name,
-                    "write_file" | "edit_file" | "write" | "edit" | "run_command"
+                    "write_file"
+                        | "edit_file"
+                        | "edit_file_hashline"
+                        | "edit_files_hashline"
+                        | "apply_workspace_edit_plan"
+                        | "write"
+                        | "edit"
+                        | "run_command"
                 )
             {
                 return Err(format!(
@@ -550,7 +557,13 @@ pub(crate) fn create_after_tool_hook_handler(
             let mut effect = HookEffect::default();
             let tool_name = context.tool_name.as_deref().unwrap_or("");
             let is_successful_rust_write = !context.tool_result_is_error.unwrap_or(false)
-                && matches!(tool_name, "write_file" | "edit_file_hashline")
+                && matches!(
+                    tool_name,
+                    "write_file"
+                        | "edit_file_hashline"
+                        | "edit_files_hashline"
+                        | "apply_workspace_edit_plan"
+                )
                 && serde_json::from_str::<Value>(context.tool_arguments.as_deref().unwrap_or("{}"))
                     .ok()
                     .and_then(|value| value.get("path").and_then(Value::as_str).map(str::to_owned))

@@ -75,6 +75,7 @@ A normal `cargo run` may be unsuitable for testing installation: update installa
 - Prefer `edit_file_hashline` for high-precision edits using line:hash anchors (e.g. '12:a3f') returned from `read_file` to ensure edit safety and prevent line drift. Use range edits (`start_anchor` to `end_anchor`) for multi-line replacements/deletions, batch multiple edits into a single tool call, and re-read the target range with `read_file` if a hash mismatch occurs.
 
 - Keep edits surgical. Do not move unrelated symbols or reformat large files without need.
+- Use `edit_files_hashline` when logically coupled changes span multiple files: it validates every workspace path, anchor, and overlap before committing any target. LSP semantic mutation tools return non-mutating workspace-edit plans; convert and apply those plans through the host anchored transaction rather than allowing an extension to write source files directly.
 - Reuse existing dependencies and runtime infrastructure.
 - Preserve separation between reusable components, panel-specific behavior, shared state, and the top-level app shell.
 - Keep chat behavior and session/sidebar behavior well-structured within GPUI views.
