@@ -25,8 +25,8 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
 use crate::state::{
-    AppState, ChatMessageInfo, MessageRole, SubagentActivityInfo, SubagentActivityStatus,
-    ToolActivityInfo, TrajectoryEntry,
+    AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityInfo,
+    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry,
 };
 
 #[derive(Clone, Debug)]
@@ -266,6 +266,12 @@ struct MarkdownRenderState {
     state: Entity<TextViewState>,
 }
 
+const MARKDOWN_CACHE_ENTRY_LIMIT: usize = 512;
+
+fn markdown_cache_exceeded(entry_count: usize) -> bool {
+    entry_count > MARKDOWN_CACHE_ENTRY_LIMIT
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TranscriptRow {
     Message(usize),
@@ -312,6 +318,24 @@ fn grouped_tool_activities(
         .iter()
         .flat_map(|message| message.tool_activities.iter())
         .filter(|activity| activity.title != "update_plan")
+}
+
+fn subagent_popover_counts(
+    statuses: impl IntoIterator<Item = SubagentActivityStatus>,
+) -> Option<(usize, usize)> {
+    let (count, active_count) = statuses
+        .into_iter()
+        .fold((0, 0), |(count, active), status| {
+            (
+                count + 1,
+                active
+                    + usize::from(matches!(
+                        status,
+                        SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+                    )),
+            )
+        });
+    (count > 0).then_some((count, active_count))
 }
 
 fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
@@ -580,7 +604,8 @@ pub struct ChatListView {
     transcript_generating: bool,
     trajectory_list_state: ListState,
     expanded_activity_groups: HashSet<String>,
-    markdown_states: HashMap<String, MarkdownRenderState>,
+    markdown_states: HashMap<(SharedString, String), MarkdownRenderState>,
+    markdown_cache_namespace: SharedString,
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
@@ -606,6 +631,19 @@ pub struct ChatListView {
     _subscriptions: Vec<Subscription>,
 }
 
+async fn next_chat_stream_batch(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>,
+) -> Option<Vec<ChatStreamEvent>> {
+    let mut events = vec![receiver.recv().await?];
+    while events.len() < 128 {
+        let Ok(event) = receiver.try_recv() else {
+            break;
+        };
+        events.push(event);
+    }
+    Some(events)
+}
+
 impl ChatListView {
     pub(crate) fn new(
         model: Entity<AppState>,
@@ -625,6 +663,9 @@ impl ChatListView {
 
         let trajectory_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
+        let mut stream_rx = model
+            .update(cx, |state, _cx| state.stream_rx.take())
+            .expect("chat stream receiver was already taken");
 
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
@@ -706,34 +747,19 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
-            let mut settle_frames = 0_u8;
-            loop {
-                // Event-driven pacing: check quickly when generating,
-                // slow down when idle.
-                let interval = if settle_frames > 0 {
-                    Duration::from_millis(30) // ~33fps for smooth streaming without UI thread starvation
-                } else {
-                    Duration::from_millis(100)
-                };
-                cx.background_executor().timer(interval).await;
-
-                let has_event =
-                    stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
-                let changed = has_event
-                    && stream_model.update(cx, |state, cx| {
-                        let changed = state.drain_chat_stream();
-                        if changed {
-                            cx.notify();
-                        }
-                        changed
-                    });
-
-                if changed {
-                    settle_frames = 1;
-                }
-                if !changed && settle_frames > 0 {
+            while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
+                let changed = stream_model.update(cx, |state, cx| {
+                    let changed = state.drain_chat_stream(events);
+                    if changed {
+                        cx.notify();
+                    }
+                    changed
+                });
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+                if changed && stream_rx.is_empty() {
                     let _ = this.update(cx, |_this, cx| cx.notify());
-                    settle_frames = settle_frames.saturating_sub(1);
                 }
             }
         })
@@ -755,6 +781,7 @@ impl ChatListView {
             trajectory_list_state,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
+            markdown_cache_namespace: SharedString::from(""),
             pasted_images: Vec::new(),
             last_session_key: None,
             initial_scroll_frames: 0,
@@ -2477,6 +2504,7 @@ impl ChatListView {
         source: &str,
         cx: &mut Context<Self>,
     ) -> Entity<TextViewState> {
+        let key = (self.markdown_cache_namespace.clone(), key);
         let entry = self
             .markdown_states
             .entry(key)
@@ -2507,31 +2535,30 @@ impl ChatListView {
 
     fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
         let model = self.model.clone();
-        TextView::new(state)
-            .selectable(true)
-            .on_link_click(move |url, event, _window, cx| {
-                let activate = match event {
-                    ClickEvent::Mouse(click) => {
-                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
-                    }
-                    ClickEvent::Keyboard(_) => true,
-                    ClickEvent::Touch(click) => !click.long_press,
-                };
-                if !activate {
-                    return;
+        // Selection hit-testing dominates scroll frames; whole-message copy remains available.
+        TextView::new(state).on_link_click(move |url, event, _window, cx| {
+            let activate = match event {
+                ClickEvent::Mouse(click) => {
+                    matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
                 }
+                ClickEvent::Keyboard(_) => true,
+                ClickEvent::Touch(click) => !click.long_press,
+            };
+            if !activate {
+                return;
+            }
 
-                match classify_chat_link(url) {
-                    ChatLinkTarget::Web => cx.open_url(url),
-                    ChatLinkTarget::ProjectFile(path) => {
-                        model.update(cx, |state, cx| {
-                            state.request_open_file(path);
-                            cx.notify();
-                        });
-                    }
-                    ChatLinkTarget::Rejected => {}
+            match classify_chat_link(url) {
+                ChatLinkTarget::Web => cx.open_url(url),
+                ChatLinkTarget::ProjectFile(path) => {
+                    model.update(cx, |state, cx| {
+                        state.request_open_file(path);
+                        cx.notify();
+                    });
                 }
-            })
+                ChatLinkTarget::Rejected => {}
+            }
+        })
     }
 
     fn render_reasoning_block(
@@ -3095,24 +3122,17 @@ impl ChatListView {
     }
 
     fn render_subagent_popover(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let subagents = self.model.read(cx).active_subagents().to_vec();
-        if subagents.is_empty() {
-            return None;
-        }
-        let active_count = subagents
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item.status,
-                    SubagentActivityStatus::Queued | SubagentActivityStatus::Running
-                )
-            })
-            .count();
+        let (count, active_count) = subagent_popover_counts(
+            self.model
+                .read(cx)
+                .active_subagents()
+                .iter()
+                .map(|item| item.status),
+        )?;
         let open = self.subagents_popover_open;
         let toggle_entity = cx.entity();
         let sync_entity = cx.entity();
         let content_entity = cx.entity();
-        let count = subagents.len();
         Some(
             Popover::new("subagents-popover")
                 .anchor(Anchor::BottomRight)
@@ -4312,13 +4332,21 @@ impl Render for ChatListView {
         };
         let session_changed = session_key != self.last_session_key;
         if session_changed {
+            self.markdown_cache_namespace = session_key
+                .as_ref()
+                .map(|(work_dir, session_id)| {
+                    SharedString::from(format!("{}\0{session_id}", work_dir.display()))
+                })
+                .unwrap_or_else(|| SharedString::from(""));
+            if markdown_cache_exceeded(self.markdown_states.len()) {
+                self.markdown_states.clear();
+            }
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
             self.trajectory_category = None;
             self.trajectory_lane = None;
             self.selected_trajectory_index = None;
             self.trajectory_search.clear();
-            self.markdown_states.clear();
             self.trajectory_cache = None;
             self.trajectory_raw_json = None;
             self.subagents_popover_open = false;
@@ -4466,18 +4494,60 @@ mod hot_path_tests {
         contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
         extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
         format_trajectory_raw_json, grouped_tool_activities, reconcile_trajectory_entries,
-        reconcile_trajectory_entries_by_epoch, summarize_trajectory,
+        markdown_cache_exceeded, next_chat_stream_batch, reconcile_trajectory_entries_by_epoch,
+        subagent_popover_counts, summarize_trajectory, MARKDOWN_CACHE_ENTRY_LIMIT,
     };
     use crate::state::{
-        ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryDiagnostics, TrajectoryEntry,
-        reported_session_shape_state,
+        ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
+        TrajectoryDiagnostics, TrajectoryEntry, reported_session_shape_state,
     };
+
+    #[test]
+    fn markdown_cache_resets_only_after_its_limit() {
+        assert!(!markdown_cache_exceeded(MARKDOWN_CACHE_ENTRY_LIMIT));
+        assert!(markdown_cache_exceeded(MARKDOWN_CACHE_ENTRY_LIMIT + 1));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_batch_waits_then_caps_ready_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                next_chat_stream_batch(&mut rx),
+            )
+            .await
+            .is_err()
+        );
+        for index in 0..130 {
+            tx.send(ChatStreamEvent::Finished {
+                session_id: index.to_string(),
+                session_file: std::path::PathBuf::new(),
+            })
+            .unwrap();
+        }
+        assert_eq!(next_chat_stream_batch(&mut rx).await.unwrap().len(), 128);
+        assert_eq!(next_chat_stream_batch(&mut rx).await.unwrap().len(), 2);
+    }
 
     #[test]
     fn trajectory_search_matches_ascii_without_case_sensitivity() {
         assert!(contains_case_insensitive("Read File", "read"));
         assert!(contains_case_insensitive("TOOL-CALL-42", "call-42"));
         assert!(!contains_case_insensitive("Write File", "read"));
+    }
+
+    #[test]
+    fn subagent_popover_counts_items_without_owning_them() {
+        assert_eq!(subagent_popover_counts([]), None);
+        assert_eq!(
+            subagent_popover_counts([
+                SubagentActivityStatus::Queued,
+                SubagentActivityStatus::Running,
+                SubagentActivityStatus::Completed,
+            ]),
+            Some((3, 2))
+        );
     }
 
     #[test]

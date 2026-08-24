@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use threadlane_session::harness::{JsonlStore, SessionStore};
 use threadlane_session::{
@@ -222,10 +222,12 @@ pub enum WorkspacePage {
 }
 
 /// A session whose durable UI projections need to be computed off the UI thread.
+#[derive(Clone)]
 pub(crate) struct SessionHydrationRequest {
     pub(crate) session_id: String,
     pub(crate) session_file: PathBuf,
     pub(crate) reload_messages: bool,
+    pub(crate) runtime_options: Option<(PathBuf, String, threadlane_session::ModelRoles)>,
 }
 
 /// The complete durable UI projection built from one JSONL store parse.
@@ -279,12 +281,12 @@ pub struct AppState {
     pub(crate) update_notice_dismissed: bool,
     pub(crate) requested_editor_target: Option<RequestedEditorTarget>,
     pub(crate) requested_composer_prompt: Option<String>,
-    stream_tx: Sender<ChatStreamEvent>,
-    stream_rx: Receiver<ChatStreamEvent>,
-    pending_stream_event: Mutex<Option<ChatStreamEvent>>,
+    stream_tx: tokio::sync::mpsc::UnboundedSender<ChatStreamEvent>,
+    pub(crate) stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>>,
     session_refresh_tx: Sender<PathBuf>,
-    session_refresh_rx: Receiver<(PathBuf, Vec<SessionInfo>)>,
-    session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
+    pub(crate) session_refresh_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>>,
+    pub(crate) session_runtimes: HashMap<PathBuf, Arc<SessionRuntime>>,
     deferred_stream_events: HashMap<String, Vec<ChatStreamEvent>>,
 }
 
@@ -350,6 +352,43 @@ fn extract_session_title(store: &impl SessionStore, fallback_id: &str) -> String
 pub fn discover_sessions_in_project(work_dir: &Path) -> Vec<SessionInfo> {
     let mut cache = SessionDiscoveryCache::default();
     discover_sessions_in_project_cached(work_dir, &mut cache)
+}
+
+fn discover_session_stubs_in_project(work_dir: &Path) -> Vec<SessionInfo> {
+    let Ok(entries) = std::fs::read_dir(work_dir.join(".threadlane/sessions")) else {
+        return Vec::new();
+    };
+    let canonical_work_dir =
+        std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    let mut sessions = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".harness.jsonl"))
+            {
+                return None;
+            }
+            let id = path.file_stem()?.to_string_lossy().to_string();
+            Some(SessionInfo {
+                title: id.clone(),
+                id,
+                work_dir: canonical_work_dir.clone(),
+                updated_at: file_mtime(&path),
+                session_file: path,
+                health: SessionHealth::Healthy,
+            })
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    sessions
 }
 
 fn discover_sessions_in_project_cached(
@@ -782,7 +821,7 @@ pub(crate) fn provider_credentials(model: &str) -> (String, Option<String>) {
     (std::env::var("OPENAI_API_KEY").unwrap_or_default(), None)
 }
 
-fn coding_agent_options(
+pub(crate) fn coding_agent_options(
     work_dir: PathBuf,
     session_file: PathBuf,
     model: String,
@@ -845,7 +884,7 @@ impl AppState {
         }
 
         for (i, p) in registry_projects.iter().enumerate() {
-            let sessions = discover_sessions_in_project(&p.path);
+            let sessions = discover_session_stubs_in_project(&p.path);
             let is_active = i == active_project_index;
 
             if is_active {
@@ -868,16 +907,16 @@ impl AppState {
                 is_expanded: true,
             });
         }
-
         let openai_key = threadlane_auth::openai_auth::load_openai_api_key()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .unwrap_or_default();
         let opencode_key =
             threadlane_auth::opencode_auth::load_opencode_api_key().unwrap_or_default();
 
-        let (stream_tx, stream_rx) = mpsc::channel();
+        let (stream_tx, stream_rx) = tokio::sync::mpsc::unbounded_channel();
         let (session_refresh_tx, session_refresh_requests) = mpsc::channel::<PathBuf>();
-        let (session_refresh_results_tx, session_refresh_rx) = mpsc::channel();
+        let (session_refresh_results_tx, session_refresh_rx) =
+            tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || {
             let mut discovery_cache = SessionDiscoveryCache::default();
             while let Ok(work_dir) = session_refresh_requests.recv() {
@@ -890,30 +929,20 @@ impl AppState {
                 }
             }
         });
-        let mut selected_model =
+        for project in &project_infos {
+            let _ = session_refresh_tx.send(project.work_dir.clone());
+        }
+        let selected_model =
             crate::model_catalog::default_model_for_project(active_work_dir.as_deref())
                 .unwrap_or_default();
 
         let model_roles = threadlane_session::ModelRoles::default();
-        let mut session_runtimes = HashMap::new();
-        let mut session_status = None;
+        let session_runtimes = HashMap::new();
+        let session_status = active_session_id
+            .as_ref()
+            .map(|_| "Loading session…".to_string());
         let messages = match (active_work_dir.as_ref(), active_session_file.as_ref()) {
-            (Some(work_dir), Some(session_file)) => {
-                let runtime = SessionRuntime::new(
-                    coding_agent_options(
-                        work_dir.clone(),
-                        session_file.clone(),
-                        selected_model.clone(),
-                        model_roles.clone(),
-                    ),
-                    ExecutionMode::Interactive,
-                );
-                selected_model = runtime.selected_model.clone();
-                session_status = runtime_status_text(runtime.status())
-                    .or_else(|| Some("Loading session…".into()));
-                session_runtimes.insert(session_file.clone(), runtime);
-                Vec::new()
-            }
+            (Some(_), Some(_)) => Vec::new(),
             _ => Vec::new(),
         };
 
@@ -944,7 +973,7 @@ impl AppState {
             context_windows: HashMap::new(),
             stashed_prompts: HashMap::new(),
             selected_model,
-            model_roles: threadlane_session::ModelRoles::default(),
+            model_roles,
             reasoning_effort: ReasoningEffort::default(),
             workspace_page: WorkspacePage::Chat,
             openai_key,
@@ -956,10 +985,9 @@ impl AppState {
             requested_editor_target: None,
             requested_composer_prompt: None,
             stream_tx,
-            stream_rx,
-            pending_stream_event: Mutex::new(None),
+            stream_rx: Some(stream_rx),
             session_refresh_tx,
-            session_refresh_rx,
+            session_refresh_rx: Some(session_refresh_rx),
             session_runtimes,
             deferred_stream_events: HashMap::new(),
             pending_permissions: HashMap::new(),
@@ -974,6 +1002,9 @@ impl AppState {
                 session_id,
                 session_file: session_file.to_path_buf(),
                 reload_messages: true,
+                runtime_options: state.active_work_dir.clone().map(|work_dir| {
+                    (work_dir, state.selected_model.clone(), state.model_roles.clone())
+                }),
             });
         }
         state
@@ -1132,19 +1163,20 @@ impl AppState {
         let _ = self.session_refresh_tx.send(work_dir.to_path_buf());
     }
 
-    pub(crate) fn apply_session_refreshes(&mut self) -> bool {
-        let mut changed = false;
-        for (work_dir, sessions) in self.session_refresh_rx.try_iter() {
-            if let Some(project) = self
-                .projects
-                .iter_mut()
-                .find(|project| project.work_dir == work_dir)
-            {
-                project.sessions = sessions;
-                changed = true;
-            }
-        }
-        changed
+    pub(crate) fn apply_session_refresh(
+        &mut self,
+        work_dir: PathBuf,
+        sessions: Vec<SessionInfo>,
+    ) -> bool {
+        let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.work_dir == work_dir)
+        else {
+            return false;
+        };
+        project.sessions = sessions;
+        true
     }
 
     fn refresh_active_session(&mut self) {
@@ -1164,6 +1196,7 @@ impl AppState {
                     session_id: session_id.clone(),
                     session_file: session_file.clone(),
                     reload_messages: true,
+                    runtime_options: None,
                 });
             }
             self.request_session_refresh(work_dir);
@@ -1249,7 +1282,6 @@ impl AppState {
             .deferred_stream_events
             .remove(&session_id)
             .unwrap_or_default();
-        let runtime = self.ensure_session_runtime(work_dir, session_file.clone());
         for event in completed_events {
             if let ChatStreamEvent::Agent { event, .. } = event {
                 self.record_trajectory(&session_id, &event);
@@ -1257,19 +1289,15 @@ impl AppState {
         }
         self.messages = Arc::new(Vec::new());
         self.active_plan = SessionPlan::default();
-        self.is_generating = runtime.is_generating();
-        self.selected_model = runtime.selected_model.clone();
+        self.is_generating = false;
         self.session_status = Some("Loading session…".into());
         let request = SessionHydrationRequest {
             session_id,
             session_file,
             reload_messages: true,
+            runtime_options: Some((work_dir, self.selected_model.clone(), self.model_roles.clone())),
         };
-        self.pending_hydrations.push(SessionHydrationRequest {
-            session_id: request.session_id.clone(),
-            session_file: request.session_file.clone(),
-            reload_messages: request.reload_messages,
-        });
+        self.pending_hydrations.push(request.clone());
         request
     }
 
@@ -3089,47 +3117,16 @@ impl AppState {
             .and_then(|key| self.context_windows.get(&key))
     }
 
-    pub(crate) fn chat_stream_pending(&self) -> bool {
-        let Ok(mut pending) = self.pending_stream_event.lock() else {
-            return false;
-        };
-        if pending.is_none() {
-            *pending = self.stream_rx.try_recv().ok();
-        }
-        pending.is_some()
-            || self
-                .active_session_id
-                .as_ref()
-                .and_then(|id| self.deferred_stream_events.get(id))
-                .is_some_and(|events| !events.is_empty())
-    }
-
-    pub(crate) fn drain_chat_stream(&mut self) -> bool {
-        const MAX_EVENTS_PER_DRAIN: usize = 128;
-        let first = self
-            .pending_stream_event
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.take());
+    pub(crate) fn drain_chat_stream(&mut self, events: Vec<ChatStreamEvent>) -> bool {
         let active_session_id = self.active_session_id.clone();
-        let mut deferred = active_session_id
+        let deferred = active_session_id
             .as_ref()
             .and_then(|session_id| self.deferred_stream_events.remove(session_id))
             .unwrap_or_default()
             .into_iter();
-        let mut first = first;
-        let mut processed = 0usize;
         let mut active_changed = false;
 
-        while processed < MAX_EVENTS_PER_DRAIN {
-            let event = deferred
-                .next()
-                .or_else(|| first.take())
-                .or_else(|| self.stream_rx.try_recv().ok());
-            let Some(event) = event else {
-                break;
-            };
-            processed = processed.saturating_add(1);
+        for event in deferred.chain(events) {
             match event {
                 ChatStreamEvent::Agent { session_id, event }
                     if self.active_session_id.as_deref() == Some(&session_id) =>
@@ -3364,6 +3361,7 @@ impl AppState {
                         session_id: session_id.clone(),
                         session_file: session_file.clone(),
                         reload_messages: true,
+                        runtime_options: None,
                     });
                     let runtime_is_stale =
                         self.session_runtimes
@@ -3405,12 +3403,6 @@ impl AppState {
                         .or_default()
                         .push(ChatStreamEvent::Agent { session_id, event });
                 }
-            }
-        }
-        if let Some(session_id) = active_session_id {
-            let remaining = deferred.collect::<Vec<_>>();
-            if !remaining.is_empty() {
-                self.deferred_stream_events.insert(session_id, remaining);
             }
         }
         active_changed
@@ -3736,6 +3728,13 @@ mod tests {
     use threadlane_session::harness::{
         OperationIntent, OperationOutcome, ProviderOutcome, Record, SessionStore, TraceString,
     };
+
+    fn take_stream_events(state: &mut AppState, limit: usize) -> Vec<ChatStreamEvent> {
+        let receiver = state.stream_rx.as_mut().unwrap();
+        std::iter::from_fn(|| receiver.try_recv().ok())
+            .take(limit)
+            .collect()
+    }
 
     #[test]
     fn cache_hit_rounding_uses_wide_intermediates_at_u64_max() {
@@ -4464,6 +4463,7 @@ mod tests {
             Some(recent_project.as_path())
         );
         assert_eq!(state.active_session_id.as_deref(), Some("recent-session"));
+        assert!(state.session_runtimes.is_empty());
         assert_eq!(
             state
                 .projects
@@ -4474,6 +4474,58 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn startup_seeds_session_rows_without_reducing_every_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let sessions_dir = project.join(".threadlane/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(sessions_dir.join("selected-session.jsonl"), "").unwrap();
+        std::fs::write(sessions_dir.join("deferred-session.jsonl"), "not jsonl").unwrap();
+
+        let mut state = AppState::load_from_registry(vec![AttachedProject {
+            id: "project".into(),
+            path: project.clone(),
+            name: "project".into(),
+            last_selected_task_id: None,
+            attached_at: 1,
+            last_opened_at: 1,
+            last_session_id: Some("selected-session".into()),
+        }]);
+
+        assert_eq!(state.active_session_id.as_deref(), Some("selected-session"));
+        assert_eq!(
+            state.projects[0]
+                .sessions
+                .iter()
+                .find(|session| session.id == "deferred-session")
+                .unwrap()
+                .title,
+            "deferred-session"
+        );
+
+        let mut receiver = state.session_refresh_rx.take().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let (work_dir, sessions) = loop {
+            if let Ok(refresh) = receiver.try_recv() {
+                break refresh;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "startup session refresh was never queued"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(state.apply_session_refresh(work_dir, sessions));
+        let deferred = state.projects[0]
+            .sessions
+            .iter()
+            .find(|session| session.id == "deferred-session")
+            .unwrap();
+        assert_eq!(deferred.title, "Unreadable session");
+        assert_eq!(deferred.health, SessionHealth::Warning);
     }
 
     #[test]
@@ -5422,12 +5474,13 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(!state.drain_chat_stream());
+        let events = take_stream_events(&mut state, 128);
+        assert!(!state.drain_chat_stream(events));
         assert!(state.messages.is_empty());
         assert_eq!(state.deferred_stream_events.len(), 1);
 
         state.active_session_id = Some("background-session".into());
-        assert!(state.drain_chat_stream());
+        assert!(state.drain_chat_stream(Vec::new()));
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.messages[0].content, "generated while away");
         assert_eq!(
@@ -5465,11 +5518,13 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(state.drain_chat_stream());
+        let events = take_stream_events(&mut state, 128);
+        assert!(state.drain_chat_stream(events));
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].content.matches(',').count(), 128);
-        assert!(state.chat_stream_pending());
-        assert!(state.drain_chat_stream());
+        let events = take_stream_events(&mut state, 128);
+        assert_eq!(events.len(), 2);
+        assert!(state.drain_chat_stream(events));
         assert_eq!(state.messages[0].content.matches(',').count(), 130);
     }
 

@@ -1,19 +1,40 @@
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use gpui::*;
+use gpui_component::ThemeMode;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::ThemeMode;
 use gpui_component::{ActiveTheme, ElementExt, Icon, IconName, Sizable};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 const DEFAULT_ROWS: u16 = 30;
 const DEFAULT_COLS: u16 = 120;
 const SCROLLBACK_ROWS: usize = 10_000;
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const TERMINAL_FLOOD_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const TERMINAL_READ_CHUNK_BYTES: usize = 8192;
+const TERMINAL_OUTPUT_BUFFERED_CHUNKS: usize = 8;
+const TERMINAL_PARSE_BUDGET_PER_FRAME: usize = TERMINAL_READ_CHUNK_BYTES * 2;
+
+fn terminal_frame_policy(saturated: bool) -> (Duration, usize) {
+    if saturated {
+        (
+            TERMINAL_FLOOD_FRAME_INTERVAL,
+            TERMINAL_PARSE_BUDGET_PER_FRAME * 2,
+        )
+    } else {
+        (TERMINAL_FRAME_INTERVAL, TERMINAL_PARSE_BUDGET_PER_FRAME)
+    }
+}
+
+fn terminal_parse_budget_exhausted(parsed_bytes: usize, parse_budget: usize) -> bool {
+    parsed_bytes >= parse_budget
+}
 
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -49,9 +70,155 @@ impl Drop for PtySession {
 }
 
 enum PtyEvent {
-    Output(Vec<u8>),
+    Frame(TerminalFrame),
     Closed,
     Error(String),
+}
+
+enum TerminalWake {
+    Events(Vec<PtyEvent>),
+    Blink,
+    Disconnected,
+}
+
+async fn next_terminal_wake(
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<PtyEvent>,
+    blink: impl Future<Output = ()>,
+) -> TerminalWake {
+    tokio::select! {
+        biased;
+        event = event_rx.recv() => {
+            let Some(event) = event else {
+                return TerminalWake::Disconnected;
+            };
+            let mut events = Vec::new();
+            let mut pending_frame = None;
+            let mut next = Some(event);
+            while let Some(event) = next {
+                match event {
+                    PtyEvent::Frame(frame) => pending_frame = Some(frame),
+                    event => {
+                        if let Some(frame) = pending_frame.take() {
+                            events.push(PtyEvent::Frame(frame));
+                        }
+                        events.push(event);
+                    }
+                }
+                next = event_rx.try_recv().ok();
+            }
+            if let Some(frame) = pending_frame {
+                events.push(PtyEvent::Frame(frame));
+            }
+            TerminalWake::Events(events)
+        }
+        _ = blink => TerminalWake::Blink,
+    }
+}
+
+enum ParserCommand {
+    Clear,
+    Resize(u16, u16),
+    SetScrollback(usize),
+}
+
+struct TerminalFrame {
+    screen: vt100::Screen,
+    scrollback: usize,
+}
+
+fn visible_terminal_frame(parser: &vt100::Parser, rows: u16, cols: u16) -> TerminalFrame {
+    let mut visible = vt100::Parser::new(rows, cols, 0);
+    visible.process(&parser.screen().state_formatted());
+    TerminalFrame {
+        screen: visible.screen().clone(),
+        scrollback: parser.screen().scrollback(),
+    }
+}
+
+fn start_parser_worker(
+    rows: u16,
+    cols: u16,
+    event_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
+) -> std::io::Result<(mpsc::SyncSender<Vec<u8>>, mpsc::Sender<ParserCommand>)> {
+    let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(TERMINAL_OUTPUT_BUFFERED_CHUNKS);
+    let (command_tx, command_rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("threadlane-gpui-terminal-parser".into())
+        .spawn(move || {
+            let mut rows = rows;
+            let mut cols = cols;
+            let mut parser = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+            let mut dirty = false;
+            let mut parsed_bytes = 0;
+            let (mut frame_interval, mut parse_budget) = terminal_frame_policy(false);
+            let mut saturated = false;
+            let mut next_frame = Instant::now() + frame_interval;
+
+            loop {
+                while let Ok(command) = command_rx.try_recv() {
+                    match command {
+                        ParserCommand::Clear => {
+                            parser = vt100::Parser::new(rows, cols, SCROLLBACK_ROWS);
+                        }
+                        ParserCommand::Resize(new_rows, new_cols) => {
+                            rows = new_rows.max(1);
+                            cols = new_cols.max(1);
+                            parser.set_size(rows, cols);
+                            let offset = parser.screen().scrollback().min(rows as usize);
+                            parser.set_scrollback(offset);
+                        }
+                        ParserCommand::SetScrollback(offset) => {
+                            parser.set_scrollback(offset.min(rows as usize));
+                        }
+                    }
+                    dirty = true;
+                }
+
+                let now = Instant::now();
+                if now >= next_frame {
+                    if dirty {
+                        if event_tx
+                            .send(PtyEvent::Frame(visible_terminal_frame(&parser, rows, cols)))
+                            .is_err()
+                        {
+                            break;
+                        }
+                        dirty = false;
+                    }
+                    (frame_interval, parse_budget) = terminal_frame_policy(saturated);
+                    parsed_bytes = 0;
+                    saturated = false;
+                    next_frame = now + frame_interval;
+                }
+
+                if terminal_parse_budget_exhausted(parsed_bytes, parse_budget) {
+                    std::thread::sleep(
+                        next_frame.saturating_duration_since(Instant::now()),
+                    );
+                    continue;
+                }
+
+                match output_rx.recv_timeout(next_frame.saturating_duration_since(Instant::now())) {
+                    Ok(bytes) => {
+                        parsed_bytes = parsed_bytes.saturating_add(bytes.len());
+                        saturated = terminal_parse_budget_exhausted(parsed_bytes, parse_budget);
+                        parser.process(&bytes);
+                        let offset = parser.screen().scrollback().min(rows as usize);
+                        parser.set_scrollback(offset);
+                        dirty = true;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        if dirty {
+                            let _ = event_tx
+                                .send(PtyEvent::Frame(visible_terminal_frame(&parser, rows, cols)));
+                        }
+                        break;
+                    }
+                }
+            }
+        })?;
+    Ok((output_tx, command_tx))
 }
 
 fn selection_bounds(
@@ -86,9 +253,10 @@ fn should_paint_cursor(is_focused: bool, terminal_hides_cursor: bool, blink_visi
 pub struct TerminalView {
     project: PathBuf,
     focus_handle: FocusHandle,
-    parser: vt100::Parser,
+    screen: vt100::Screen,
+    parser_command_tx: Option<mpsc::Sender<ParserCommand>>,
     session: Option<PtySession>,
-    event_tx: mpsc::Sender<PtyEvent>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
     status: Option<String>,
     rows: u16,
     cols: u16,
@@ -103,31 +271,28 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub(crate) fn new(project: PathBuf, cx: &mut Context<Self>) -> Self {
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         cx.spawn(async move |this, cx| {
-            let mut last_cursor_blink = Instant::now();
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let events = event_rx.try_iter().collect::<Vec<_>>();
-                let blink_due = last_cursor_blink.elapsed() >= CURSOR_BLINK_INTERVAL;
-                if events.is_empty() && !blink_due {
-                    continue;
-                }
-                let has_events = !events.is_empty();
-                if has_events || blink_due {
-                    last_cursor_blink = Instant::now();
-                }
+                let wake = next_terminal_wake(
+                    &mut event_rx,
+                    cx.background_executor().timer(CURSOR_BLINK_INTERVAL),
+                )
+                .await;
+                let (events, blink) = match wake {
+                    TerminalWake::Events(events) => (events, false),
+                    TerminalWake::Blink => (Vec::new(), true),
+                    TerminalWake::Disconnected => break,
+                };
                 if this
                     .update(cx, |this, cx| {
                         for event in events {
                             this.apply_event(event);
                         }
-                        if has_events {
-                            this.cursor_visible = true;
-                        } else {
+                        if blink {
                             this.cursor_visible = !this.cursor_visible;
+                        } else {
+                            this.cursor_visible = true;
                         }
                         cx.notify();
                     })
@@ -142,7 +307,10 @@ impl TerminalView {
         let mut terminal = Self {
             project,
             focus_handle: cx.focus_handle(),
-            parser: vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, SCROLLBACK_ROWS),
+            screen: vt100::Parser::new(DEFAULT_ROWS, DEFAULT_COLS, 0)
+                .screen()
+                .clone(),
+            parser_command_tx: None,
             session: None,
             event_tx,
             status: None,
@@ -171,7 +339,8 @@ impl TerminalView {
     /// Terminates the current shell and starts a fresh login-capable interactive shell.
     pub fn restart(&mut self, cx: &mut Context<Self>) {
         self.session.take();
-        self.parser = vt100::Parser::new(self.rows, self.cols, SCROLLBACK_ROWS);
+        self.parser_command_tx = None;
+        self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
         self.scrollback_offset = 0;
         self.scroll_accumulator = 0.0;
         self.status = None;
@@ -181,7 +350,10 @@ impl TerminalView {
 
     /// Clears both the emulator scrollback and the visible screen.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
-        self.parser = vt100::Parser::new(self.rows, self.cols, SCROLLBACK_ROWS);
+        self.screen = vt100::Parser::new(self.rows, self.cols, 0).screen().clone();
+        if let Some(parser) = &self.parser_command_tx {
+            let _ = parser.send(ParserCommand::Clear);
+        }
         self.scrollback_offset = 0;
         self.scroll_accumulator = 0.0;
         self.status = None;
@@ -198,7 +370,6 @@ impl TerminalView {
             let current = self.scrollback_offset as isize;
             let new_offset = (current + whole_lines).max(0) as usize;
             self.set_scrollback(new_offset);
-            self.scrollback_offset = self.parser.screen().scrollback();
             if self.scrollback_offset != previous_offset {
                 self.clear_selection();
             }
@@ -222,7 +393,6 @@ impl TerminalView {
         let previous_offset = self.scrollback_offset;
         self.scroll_accumulator = 0.0;
         self.set_scrollback(SCROLLBACK_ROWS);
-        self.scrollback_offset = self.parser.screen().scrollback();
         if self.scrollback_offset != previous_offset {
             self.clear_selection();
         }
@@ -240,9 +410,9 @@ impl TerminalView {
         self.rows = rows;
         self.cols = cols;
         self.clear_selection();
-        self.parser.set_size(rows, cols);
-        self.set_scrollback(self.scrollback_offset);
-        self.scrollback_offset = self.parser.screen().scrollback();
+        if let Some(parser) = &self.parser_command_tx {
+            let _ = parser.send(ParserCommand::Resize(rows, cols));
+        }
         if let Some(session) = &self.session {
             session.resize(rows, cols);
         }
@@ -254,10 +424,26 @@ impl TerminalView {
     }
 
     fn start(&mut self) {
-        match spawn_shell(&self.project, self.rows, self.cols, self.event_tx.clone()) {
-            Ok(session) => self.session = Some(session),
+        let result = start_parser_worker(self.rows, self.cols, self.event_tx.clone())
+            .map_err(anyhow::Error::from)
+            .and_then(|(output_tx, command_tx)| {
+                spawn_shell(
+                    &self.project,
+                    self.rows,
+                    self.cols,
+                    output_tx,
+                    self.event_tx.clone(),
+                )
+                .map(|session| (session, command_tx))
+            });
+        match result {
+            Ok((session, command_tx)) => {
+                self.session = Some(session);
+                self.parser_command_tx = Some(command_tx);
+            }
             Err(error) => {
                 self.session = None;
+                self.parser_command_tx = None;
                 self.status = Some(format!("Unable to start terminal: {error}"));
             }
         }
@@ -265,15 +451,9 @@ impl TerminalView {
 
     fn apply_event(&mut self, event: PtyEvent) {
         match event {
-            PtyEvent::Output(bytes) => {
-                self.parser.process(&bytes);
-                if self.scrollback_offset == 0 {
-                    self.set_scrollback(0);
-                } else {
-                    self.set_scrollback(self.scrollback_offset);
-                    self.scrollback_offset = self.parser.screen().scrollback();
-                }
-                self.status = None;
+            PtyEvent::Frame(frame) => {
+                self.screen = frame.screen;
+                self.scrollback_offset = frame.scrollback;
             }
             PtyEvent::Closed => {
                 if self.session.is_some() {
@@ -287,7 +467,10 @@ impl TerminalView {
     // vt100's visible_rows subtracts the offset from the live row count, so
     // keep it within one screen even when scrollback history is much larger.
     fn set_scrollback(&mut self, offset: usize) {
-        self.parser.set_scrollback(offset.min(self.rows as usize));
+        self.scrollback_offset = offset.min(self.rows as usize);
+        if let Some(parser) = &self.parser_command_tx {
+            let _ = parser.send(ParserCommand::SetScrollback(self.scrollback_offset));
+        }
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -297,7 +480,7 @@ impl TerminalView {
     }
 
     fn paste(&self, text: String) {
-        if self.parser.screen().bracketed_paste() {
+        if self.screen.bracketed_paste() {
             self.send(b"\x1b[200~");
             self.send(text.as_bytes());
             self.send(b"\x1b[201~");
@@ -373,7 +556,7 @@ impl TerminalView {
                     .read_from_clipboard()
                     .and_then(|item| item.text())
                     .map(|text| {
-                        if self.parser.screen().bracketed_paste() {
+                        if self.screen.bracketed_paste() {
                             [
                                 b"\x1b[200~".as_slice(),
                                 text.as_bytes(),
@@ -441,7 +624,7 @@ impl TerminalView {
             + 2 * u8::from(modifiers.alt)
             + 4 * u8::from(modifiers.control);
         if modifier == 1 {
-            if self.parser.screen().application_cursor() {
+            if self.screen.application_cursor() {
                 vec![0x1b, b'O', key]
             } else {
                 vec![0x1b, b'[', key]
@@ -452,7 +635,7 @@ impl TerminalView {
     }
 
     fn screen_text(&self) -> String {
-        let mut text = self.parser.screen().contents();
+        let mut text = self.screen.contents();
         if let Some(status) = &self.status {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -479,11 +662,7 @@ impl TerminalView {
     fn selected_text(&self) -> Option<String> {
         let (anchor, head) = (self.selection_anchor?, self.selection_head?);
         let (start, end) = selection_bounds(anchor, head, self.cols)?;
-        Some(
-            self.parser
-                .screen()
-                .contents_between(start.0, start.1, end.0, end.1),
-        )
+        Some(self.screen.contents_between(start.0, start.1, end.0, end.1))
     }
 
     fn clear_selection(&mut self) {
@@ -651,7 +830,7 @@ impl Render for TerminalView {
         }
         let cell_width = self.cell_width;
 
-        let screen = self.parser.screen();
+        let screen = &self.screen;
         let (cursor_row, cursor_col) = screen.cursor_position();
         let hide_cursor = screen.hide_cursor();
 
@@ -932,7 +1111,8 @@ fn spawn_shell(
     project: &PathBuf,
     rows: u16,
     cols: u16,
-    event_tx: mpsc::Sender<PtyEvent>,
+    output_tx: mpsc::SyncSender<Vec<u8>>,
+    event_tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
 ) -> anyhow::Result<PtySession> {
     let pair = native_pty_system().openpty(PtySize {
         rows,
@@ -954,7 +1134,7 @@ fn spawn_shell(
     std::thread::Builder::new()
         .name("threadlane-gpui-pty-reader".into())
         .spawn(move || {
-            let mut buffer = [0_u8; 8192];
+            let mut buffer = [0_u8; TERMINAL_READ_CHUNK_BYTES];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
@@ -962,10 +1142,7 @@ fn spawn_shell(
                         break;
                     }
                     Ok(read) => {
-                        if event_tx
-                            .send(PtyEvent::Output(buffer[..read].to_vec()))
-                            .is_err()
-                        {
+                        if output_tx.send(buffer[..read].to_vec()).is_err() {
                             break;
                         }
                     }
@@ -986,7 +1163,105 @@ fn spawn_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::{ansi_index_to_hsla, rgb_to_hsla, selection_bounds, should_paint_cursor};
+    use std::future::{pending, ready};
+    use std::time::Duration;
+
+    use super::{
+        ParserCommand, PtyEvent, TERMINAL_PARSE_BUDGET_PER_FRAME, TerminalWake,
+        ansi_index_to_hsla, next_terminal_wake, rgb_to_hsla, selection_bounds,
+        should_paint_cursor, start_parser_worker, terminal_frame_policy,
+        terminal_parse_budget_exhausted,
+    };
+
+    #[test]
+    fn terminal_parser_yields_at_its_frame_budget() {
+        assert!(!terminal_parse_budget_exhausted(
+            TERMINAL_PARSE_BUDGET_PER_FRAME - 1,
+            TERMINAL_PARSE_BUDGET_PER_FRAME,
+        ));
+        assert!(terminal_parse_budget_exhausted(
+            TERMINAL_PARSE_BUDGET_PER_FRAME,
+            TERMINAL_PARSE_BUDGET_PER_FRAME,
+        ));
+    }
+
+    #[test]
+    fn saturated_terminal_halves_redraws_and_approximately_preserves_parse_throughput() {
+        let (normal_interval, normal_budget) = terminal_frame_policy(false);
+        let (flood_interval, flood_budget) = terminal_frame_policy(true);
+
+        assert_eq!(normal_interval, Duration::from_millis(16));
+        assert_eq!(flood_interval, Duration::from_millis(33));
+        assert_eq!(flood_budget, normal_budget * 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_wake_coalesces_queued_frames_immediately() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut parser = vt100::Parser::new(2, 8, 0);
+        parser.process(b"old");
+        event_tx
+            .send(PtyEvent::Frame(super::TerminalFrame {
+                screen: parser.screen().clone(),
+                scrollback: 0,
+            }))
+            .unwrap();
+        parser.process(b"\rnew");
+        event_tx
+            .send(PtyEvent::Frame(super::TerminalFrame {
+                screen: parser.screen().clone(),
+                scrollback: 0,
+            }))
+            .unwrap();
+        event_tx.send(PtyEvent::Error("closed".into())).unwrap();
+
+        let TerminalWake::Events(events) = next_terminal_wake(&mut event_rx, pending()).await
+        else {
+            panic!("expected terminal events");
+        };
+        assert_eq!(events.len(), 2);
+        let PtyEvent::Frame(frame) = &events[0] else {
+            panic!("expected latest terminal frame");
+        };
+        assert_eq!(frame.screen.contents(), "new");
+        assert!(matches!(events[1], PtyEvent::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn terminal_wake_uses_the_cursor_timer_when_idle() {
+        let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(matches!(
+            next_terminal_wake(&mut event_rx, ready(())).await,
+            TerminalWake::Blink
+        ));
+    }
+
+    #[tokio::test]
+    async fn parser_worker_publishes_output_and_clear_frames() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (output_tx, command_tx) = start_parser_worker(2, 8, event_tx).unwrap();
+
+        output_tx.send(b"hello".to_vec()).unwrap();
+        let PtyEvent::Frame(frame) = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected parsed terminal frame");
+        };
+        assert_eq!(frame.screen.contents(), "hello");
+
+        command_tx.send(ParserCommand::Clear).unwrap();
+        let PtyEvent::Frame(frame) = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected cleared terminal frame");
+        };
+        assert_eq!(frame.screen.contents(), "");
+    }
 
     #[test]
     fn xterm_color_cube_uses_standard_channel_levels() {

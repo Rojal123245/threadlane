@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_session::{
     AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpManager, AcpScope, AcpSettings,

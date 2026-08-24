@@ -1,6 +1,3 @@
-use std::sync::mpsc::{self, Sender};
-use std::time::Duration;
-
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::alert::{Alert, AlertVariant};
@@ -14,6 +11,7 @@ use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
+use crate::screens::next_event_batch;
 use crate::services::provider_auth::{self, ProviderAuthEvent};
 use crate::services::settings::{self, SettingsEvent};
 use crate::state::AppState;
@@ -80,8 +78,8 @@ pub struct SettingsView {
     skill_rows: Vec<SkillMetadata>,
     acp_rows: Vec<AcpAgentRecord>,
     capability_status: Option<String>,
-    auth_tx: Sender<ProviderAuthEvent>,
-    settings_tx: Sender<SettingsEvent>,
+    auth_tx: tokio::sync::mpsc::UnboundedSender<ProviderAuthEvent>,
+    settings_tx: tokio::sync::mpsc::UnboundedSender<SettingsEvent>,
     auth_message: Option<AuthStatusMessage>,
     providers_snapshot: Option<ProvidersStatusSnapshot>,
     _subscriptions: Vec<Subscription>,
@@ -157,17 +155,10 @@ impl SettingsView {
             InputState::new(window, cx).placeholder("npx -y @zed-industries/claude-code-acp")
         });
 
-        let (auth_tx, auth_rx) = mpsc::channel();
+        let (auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel();
         let auth_model = model.clone();
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let events = auth_rx.try_iter().collect::<Vec<_>>();
-                if events.is_empty() {
-                    continue;
-                }
+            while let Some(events) = next_event_batch(&mut auth_rx).await {
                 let _ = this.update(cx, |this, cx| {
                     for event in events {
                         let credentials_changed = matches!(event, ProviderAuthEvent::Connected(_));
@@ -201,7 +192,7 @@ impl SettingsView {
         })
         .detach();
 
-        let (settings_tx, settings_rx) = mpsc::channel();
+        let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
         let observe_model = cx.observe(&model, |_this, _model, cx| cx.notify());
         let openai_model = model.clone();
         let save_openai = cx.subscribe_in(
@@ -247,14 +238,7 @@ impl SettingsView {
             },
         );
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let events = settings_rx.try_iter().collect::<Vec<_>>();
-                if events.is_empty() {
-                    continue;
-                }
+            while let Some(events) = next_event_batch(&mut settings_rx).await {
                 let _ = this.update(cx, |this, cx| {
                     for event in events {
                         match event {
