@@ -6,16 +6,16 @@ use super::subagents::*;
 
 use super::broker::ManagedProcessRegistry;
 use super::capabilities::{
-    build_broker_dispatcher, render_agent_catalog, restored_tool_policy, McpCapability,
-    PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
+    McpCapability, PlanCapability, SkillCapability, SubagentCapability, WasiCapability,
+    build_broker_dispatcher, render_agent_catalog, restored_tool_policy,
 };
 use super::harness::{CodingSessionHarness, HarnessWatch, InterruptedSubagentRecoveryState};
-use crate::commands::{execute_slash_command, parse_slash_command, CommandAction};
+use crate::commands::{CommandAction, execute_slash_command, parse_slash_command};
 use crate::context::ProjectContext;
 use crate::extension_broker::CapabilityDispatcher;
 use crate::plan::SessionPlanStore;
 use crate::policy::ToolPolicy;
-use crate::system_prompt::{build_system_prompt, SystemPromptBuildOptions};
+use crate::system_prompt::{SystemPromptBuildOptions, build_system_prompt};
 use log::warn;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,6 +40,7 @@ pub struct CodingAgent {
     pub wasi_extensions: Arc<WasiExtensionManager>,
     pub(crate) tool_policy: Arc<tokio::sync::Mutex<ToolPolicy>>,
     pub(crate) work_dir: PathBuf,
+    pub(crate) agent_config: threadlane_runtime::AgentConfig,
     pub(crate) skills: Arc<SkillRegistry>,
     pub(crate) agent_runner: AgentRunner,
     pub(crate) broker_dispatcher: Arc<CapabilityDispatcher>,
@@ -390,6 +391,7 @@ impl CodingAgent {
         let runner_api_key = agent.api_key.clone();
         let runner_account_id = agent.account_id.clone();
         let runner_state = agent.turn.clone();
+        let runner_config = agent_config.clone();
         let runner_work_dir = options.work_dir.clone();
         let runner_extensions = wasi_extensions.clone();
         let runner_event_tx = agent.event_tx.clone();
@@ -408,6 +410,7 @@ impl CodingAgent {
             let api_key = runner_api_key.clone();
             let account_id = runner_account_id.clone();
             let state = runner_state.clone();
+            let runner_config = runner_config.clone();
             let work_dir = runner_work_dir.clone();
             let extensions = runner_extensions.clone();
             let event_tx = runner_event_tx.clone();
@@ -417,7 +420,17 @@ impl CodingAgent {
             let completed_lanes = runner_completed_lanes.clone();
             let parent_session_id = parent_session_id.clone();
             Box::pin(async move {
-                let model = state.lock().await.model.clone();
+                let (model, parent_reasoning_effort) = {
+                    let state = state.lock().await;
+                    (state.model.clone(), state.reasoning_effort())
+                };
+                let child_model = runner_config
+                    .subagent_model
+                    .clone()
+                    .unwrap_or_else(|| model.clone());
+                let child_reasoning_effort = runner_config
+                    .subagent_reasoning_effort
+                    .unwrap_or(parent_reasoning_effort);
                 #[cfg(test)]
                 let observer = observer
                     .and_then(|observer| observer.lock().ok().and_then(|value| value.clone()));
@@ -428,7 +441,8 @@ impl CodingAgent {
                     SubagentRunContext {
                         api_key,
                         account_id,
-                        parent_model: model,
+                        child_model,
+                        child_reasoning_effort,
                         parent_session_id: parent_session_id.clone(),
                         work_dir,
                         extensions,
@@ -539,6 +553,7 @@ impl CodingAgent {
             wasi_extensions,
             tool_policy,
             work_dir: options.work_dir,
+            agent_config,
             skills,
             agent_runner,
             broker_dispatcher,
@@ -1197,17 +1212,16 @@ impl CodingAgent {
 #[cfg(test)]
 mod compaction_sync_tests {
     use super::{
-        durable_prompt_snapshot, requires_harness_compaction_reset, CodingAgent,
-        CodingAgentOptions, CompletedSubagentLane, SubagentLaneStatus,
-        MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
+        CodingAgent, CodingAgentOptions, CompletedSubagentLane, MAX_PERSISTED_SYSTEM_PROMPT_BYTES,
+        SubagentLaneStatus, durable_prompt_snapshot, requires_harness_compaction_reset,
     };
     use crate::system_prompt::SystemPromptConfig;
     use async_trait::async_trait;
     use std::{
         collections::HashSet,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
         },
     };
     use threadlane_protocol::{
@@ -1215,10 +1229,10 @@ mod compaction_sync_tests {
         RuntimeToolCallFunction, RuntimeUsage,
     };
     use threadlane_runtime::{
-        harness::{
-            read_transcript_page, CompactionReason, JsonlStore, SessionStore, TranscriptItem,
-        },
         AgentConfig, AgentMessage, Record,
+        harness::{
+            CompactionReason, JsonlStore, SessionStore, TranscriptItem, read_transcript_page,
+        },
     };
 
     fn summary() -> AgentMessage {
@@ -1306,6 +1320,7 @@ mod compaction_sync_tests {
                 run_id: identity.identity.run_id,
                 task: "inspect".into(),
                 agent: "worker".into(),
+                model: "test-model".into(),
                 status: SubagentLaneStatus::Completed,
                 messages: vec![AgentMessage::Assistant {
                     content: Some("done".into()),
@@ -1323,10 +1338,12 @@ mod compaction_sync_tests {
             &entry.message,
             AgentMessage::Custom { custom_type, .. } if custom_type == "subagent_lane"
         )));
-        assert!(store
-            .entries()
-            .iter()
-            .all(|entry| entry.parent_id.as_deref() != Some("node_69")));
+        assert!(
+            store
+                .entries()
+                .iter()
+                .all(|entry| entry.parent_id.as_deref() != Some("node_69"))
+        );
     }
 
     struct LongToolLoopProvider {
@@ -1556,14 +1573,18 @@ mod compaction_sync_tests {
         // The reopened branch selects the latest durable checkpoint and a descendant leaf.
         let model_context = store.model_context("main").unwrap();
         let checkpoint = model_context.checkpoint.expect("durable checkpoint");
-        assert!(model_context
-            .leaf_id
-            .as_deref()
-            .is_some_and(|leaf| leaf != checkpoint.entry_id));
-        assert!(model_context
-            .entries
-            .iter()
-            .any(|entry| entry.id == checkpoint.entry_id));
+        assert!(
+            model_context
+                .leaf_id
+                .as_deref()
+                .is_some_and(|leaf| leaf != checkpoint.entry_id)
+        );
+        assert!(
+            model_context
+                .entries
+                .iter()
+                .any(|entry| entry.id == checkpoint.entry_id)
+        );
 
         let page = read_transcript_page(&path, None, 1_000).unwrap();
         assert!(!page.has_older);

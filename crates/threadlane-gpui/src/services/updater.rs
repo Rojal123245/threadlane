@@ -1,5 +1,5 @@
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_updater::{UpdateReleaseInfo, UpdateStatus};
 

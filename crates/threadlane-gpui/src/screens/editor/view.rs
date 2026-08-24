@@ -11,6 +11,11 @@ use gpui_component::{ActiveTheme, Disableable, IconName, Sizable};
 
 use crate::state::AppState;
 
+actions!(editor, [SaveFile]);
+
+/// How long a save/open status message stays visible before auto-expiring.
+const STATUS_MSG_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
 fn detect_language(path_str: &str) -> &'static str {
     let path = Path::new(path_str);
     match path
@@ -101,7 +106,7 @@ pub struct EditorView {
     tabs: Vec<EditorTab>,
     active_tab_index: Option<usize>,
     pending_open: Option<PendingOpen>,
-    status_msg: Option<String>,
+    status_msg: Option<(String, bool, std::time::Instant)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -248,7 +253,7 @@ impl EditorView {
             Ok(c) => c,
             Err(err) => {
                 tracing::error!("Failed to open file {}: {}", full_path.display(), err);
-                self.status_msg = Some(format!("Unable to open {}: {err}", relative_path));
+                self.set_status(format!("Unable to open {}: {err}", relative_path), true);
                 cx.notify();
                 return;
             }
@@ -305,6 +310,19 @@ impl EditorView {
         self.active_tab_index = Some(self.tabs.len() - 1);
         self.status_msg = None;
         cx.notify();
+    }
+
+    fn set_status(&mut self, msg: String, is_error: bool) {
+        self.status_msg = Some((msg, is_error, std::time::Instant::now()));
+    }
+
+    fn visible_status(&self) -> Option<(String, bool)> {
+        match &self.status_msg {
+            Some((msg, is_error, at)) if at.elapsed() < STATUS_MSG_TTL => {
+                Some((msg.clone(), *is_error))
+            }
+            _ => None,
+        }
     }
 
     pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -482,6 +500,10 @@ impl EditorView {
         self.save_tab_at(idx, cx);
     }
 
+    fn save_file_action(&mut self, _: &SaveFile, _window: &mut Window, cx: &mut Context<Self>) {
+        self.save_active_file(cx);
+    }
+
     pub fn save_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
@@ -497,17 +519,18 @@ impl EditorView {
 
         let file_path = tab.project_dir.join(&tab.relative_path);
         let content = editor.read(cx).value().to_string();
+        let file_name = tab.file_name.clone();
 
         match std::fs::write(&file_path, &content) {
             Ok(_) => {
                 tab.saved_content = content;
                 tab.is_dirty = false;
-                self.status_msg = Some(format!("Saved {}", tab.file_name));
+                self.set_status(format!("Saved {file_name}"), false);
                 cx.notify();
             }
             Err(err) => {
                 tracing::error!("Failed to save file {}: {}", file_path.display(), err);
-                self.status_msg = Some(format!("Error saving {}: {}", tab.file_name, err));
+                self.set_status(format!("Error saving {file_name}: {err}"), true);
                 cx.notify();
             }
         }
@@ -537,7 +560,7 @@ impl EditorView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .overflow_x_hidden()
+                    .overflow_x_scrollbar()
                     .children(self.tabs.iter().enumerate().map(|(idx, tab)| {
                         let is_selected = Some(idx) == self.active_tab_index;
                         let tab_bg = if is_selected {
@@ -667,12 +690,16 @@ impl EditorView {
                     .items_center()
                     .gap_1()
                     .px_1()
-                    .child(if let Some(msg) = &self.status_msg {
+                    .child(if let Some((msg, is_error)) = self.visible_status() {
                         div()
                             .text_size(px(11.0))
-                            .text_color(theme.muted_foreground)
+                            .text_color(if is_error {
+                                theme.danger
+                            } else {
+                                theme.muted_foreground
+                            })
                             .px_2()
-                            .child(msg.clone())
+                            .child(msg)
                             .into_any_element()
                     } else {
                         div().into_any_element()
@@ -754,6 +781,7 @@ impl Render for EditorView {
             .min_w_0()
             .min_h_0()
             .bg(theme.background)
+            .on_action(cx.listener(Self::save_file_action))
             .children(self.has_tabs().then(|| self.render_tab_bar(cx)))
             .child(if let Some(idx) = self.active_tab_index {
                 if let Some(active_tab) = self.tabs.get(idx) {

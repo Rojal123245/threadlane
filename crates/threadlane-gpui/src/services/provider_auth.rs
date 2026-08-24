@@ -1,4 +1,4 @@
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender as Sender;
 
 #[derive(Clone, Debug)]
 pub enum ProviderAuthEvent {

@@ -1,15 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::time::Duration;
 
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::resizable::{h_resizable, resizable_panel, v_resizable, ResizableState};
+use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{v_flex, ActiveTheme, Icon, IconName, Root, Selectable, Sizable};
+use gpui_component::{ActiveTheme, Icon, IconName, Root, Selectable, Sizable, v_flex};
 
 actions!(
     threadlane_workspace,
@@ -32,10 +31,11 @@ use crate::screens::right_panel::RightPanelView;
 use crate::screens::settings::SettingsView;
 use crate::screens::sidebar::SidebarView;
 use crate::screens::terminal::TerminalView;
+use crate::services::sessions::{ExecutionMode, SessionRuntime};
 use crate::services::updater::{self, UpdaterEvent};
 use crate::state::{
-    compute_full_session_projection, compute_session_messages, AppState, SessionHydrationRequest,
-    WorkspacePage,
+    AppState, SessionHydrationRequest, SessionInfo, WorkspacePage, coding_agent_options,
+    compute_full_session_projection, compute_session_messages, runtime_status_text,
 };
 use threadlane_updater::UpdateStatus;
 
@@ -54,6 +54,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
         KeyBinding::new("escape", CancelActiveGeneration, None),
+        KeyBinding::new("cmd-s", crate::screens::editor::SaveFile, None),
+        KeyBinding::new("ctrl-s", crate::screens::editor::SaveFile, None),
     ]);
 }
 
@@ -62,6 +64,27 @@ enum GitEvent {
         work_dir: PathBuf,
         result: Result<GitStatus, String>,
     },
+}
+
+enum WorkspacePumpEvent {
+    Git(GitEvent),
+    Updater(UpdaterEvent),
+    Sessions(PathBuf, Vec<SessionInfo>),
+    Model,
+}
+
+async fn next_workspace_event(
+    git_rx: &mut tokio::sync::mpsc::UnboundedReceiver<GitEvent>,
+    updater_rx: &mut tokio::sync::mpsc::UnboundedReceiver<UpdaterEvent>,
+    sessions_rx: &mut tokio::sync::mpsc::UnboundedReceiver<(PathBuf, Vec<SessionInfo>)>,
+    model_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) -> Option<WorkspacePumpEvent> {
+    tokio::select! {
+        event = git_rx.recv() => event.map(WorkspacePumpEvent::Git),
+        event = updater_rx.recv() => event.map(WorkspacePumpEvent::Updater),
+        event = sessions_rx.recv() => event.map(|(work_dir, sessions)| WorkspacePumpEvent::Sessions(work_dir, sessions)),
+        event = model_rx.recv() => event.map(|()| WorkspacePumpEvent::Model),
+    }
 }
 
 struct TerminalGroup {
@@ -113,8 +136,8 @@ pub struct WorkspaceView {
     sidebar_resizable_state: Entity<ResizableState>,
     right_panel_resizable_state: Entity<ResizableState>,
     bottom_panel_resizable_state: Entity<ResizableState>,
-    git_event_tx: mpsc::Sender<GitEvent>,
-    updater_tx: mpsc::Sender<UpdaterEvent>,
+    git_event_tx: tokio::sync::mpsc::UnboundedSender<GitEvent>,
+    updater_tx: tokio::sync::mpsc::UnboundedSender<UpdaterEvent>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -125,6 +148,15 @@ impl WorkspaceView {
         cx: &mut AsyncApp,
     ) {
         cx.spawn(async move |cx| {
+            let runtime_task = request.runtime_options.clone().map(|(work_dir, model, roles)| {
+                let session_file = request.session_file.clone();
+                cx.background_executor().spawn(async move {
+                    SessionRuntime::new(
+                        coding_agent_options(work_dir, session_file, model, roles),
+                        ExecutionMode::Interactive,
+                    )
+                })
+            });
             if request.reload_messages {
                 let history_file = request.session_file.clone();
                 let history = cx
@@ -153,6 +185,10 @@ impl WorkspaceView {
                 .background_executor()
                 .spawn(async move { compute_full_session_projection(&session_file) })
                 .await;
+            let runtime = match runtime_task {
+                Some(task) => Some(task.await),
+                None => None,
+            };
             let _ = model.update(cx, |state, cx| {
                 if !state.active_session_matches(&request.session_id, &request.session_file) {
                     return;
@@ -168,6 +204,17 @@ impl WorkspaceView {
                     }
                     Err(error) => {
                         state.session_status = Some(format!("Could not load session: {error}"))
+                    }
+                }
+                if let Some(runtime) = runtime {
+                    let runtime = state
+                        .session_runtimes
+                        .entry(request.session_file.clone())
+                        .or_insert(runtime);
+                    state.is_generating = runtime.is_generating();
+                    state.selected_model = runtime.selected_model.clone();
+                    if let Some(status) = runtime_status_text(runtime.status()) {
+                        state.session_status = Some(status);
                     }
                 }
                 cx.notify();
@@ -186,8 +233,13 @@ impl WorkspaceView {
         let right_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let bottom_panel_resizable_state = cx.new(|_cx| ResizableState::default());
         let command_state = cx.new(|cx| CommandState::new(window, cx));
-        let (git_event_tx, git_event_rx) = mpsc::channel();
-        let (updater_tx, updater_rx) = mpsc::channel();
+        let (git_event_tx, mut git_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (updater_tx, mut updater_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (model_wake_tx, mut model_wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut session_refresh_rx = model
+            .update(cx, |state, _cx| state.session_refresh_rx.take())
+            .expect("session refresh receiver was already taken");
+        let _ = model_wake_tx.send(());
 
         #[cfg(target_os = "macos")]
         if threadlane_updater::is_configured() {
@@ -196,53 +248,78 @@ impl WorkspaceView {
 
         let model_clone = model.clone();
         let view = cx.new(|cx| {
-            let sub = cx.observe(&model_clone, |this: &mut Self, _model, cx| {
+            let sub = cx.observe(&model_clone, move |this: &mut Self, _model, cx| {
                 this.sync_git_status_with_active_project(cx);
+                let _ = model_wake_tx.send(());
                 cx.notify();
             });
 
-            cx.spawn(async move |this, cx| loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(80))
-                    .await;
-                let git_events = git_event_rx.try_iter().collect::<Vec<_>>();
-                let updater_events = updater_rx.try_iter().collect::<Vec<_>>();
-                let hydration_requests = this
-                    .update(cx, |this, cx| {
-                        this.model.update(cx, |state, _cx| {
-                            std::mem::take(&mut state.pending_hydrations)
-                        })
-                    })
-                    .unwrap_or_default();
-                for request in hydration_requests {
-                    let model = this.update(cx, |this, _cx| this.model.clone()).ok();
-                    if let Some(model) = model {
-                        Self::spawn_session_hydration(model, request, cx);
+            cx.spawn(async move |this, cx| {
+                while let Some(event) = next_workspace_event(
+                    &mut git_event_rx,
+                    &mut updater_rx,
+                    &mut session_refresh_rx,
+                    &mut model_wake_rx,
+                )
+                .await
+                {
+                    let mut git_events = Vec::new();
+                    let mut updater_events = Vec::new();
+                    let mut session_refreshes = Vec::new();
+                    match event {
+                        WorkspacePumpEvent::Git(event) => git_events.push(event),
+                        WorkspacePumpEvent::Updater(event) => updater_events.push(event),
+                        WorkspacePumpEvent::Sessions(work_dir, sessions) => {
+                            session_refreshes.push((work_dir, sessions));
+                        }
+                        WorkspacePumpEvent::Model => {}
                     }
-                }
-                let has_events = !git_events.is_empty() || !updater_events.is_empty();
-                let _ = this.update(cx, |this, cx| {
-                    let mut changed = has_events;
-                    this.model.update(cx, |state, cx| {
-                        if state.apply_session_refreshes() {
-                            changed = true;
+                    git_events.extend(std::iter::from_fn(|| git_event_rx.try_recv().ok()));
+                    updater_events.extend(std::iter::from_fn(|| updater_rx.try_recv().ok()));
+                    session_refreshes
+                        .extend(std::iter::from_fn(|| session_refresh_rx.try_recv().ok()));
+                    while model_wake_rx.try_recv().is_ok() {}
+                    let hydration_requests = this
+                        .update(cx, |this, cx| {
+                            this.model.update(cx, |state, _cx| {
+                                std::mem::take(&mut state.pending_hydrations)
+                            })
+                        })
+                        .unwrap_or_default();
+                    for request in hydration_requests {
+                        let model = this.update(cx, |this, _cx| this.model.clone()).ok();
+                        if let Some(model) = model {
+                            Self::spawn_session_hydration(model, request, cx);
+                        }
+                    }
+                    let has_events = !git_events.is_empty()
+                        || !updater_events.is_empty()
+                        || !session_refreshes.is_empty();
+                    let _ = this.update(cx, |this, cx| {
+                        let mut changed = has_events;
+                        this.model.update(cx, |state, cx| {
+                            for (work_dir, sessions) in session_refreshes {
+                                changed |= state.apply_session_refresh(work_dir, sessions);
+                            }
+                            if changed {
+                                cx.notify();
+                            }
+                        });
+                        for event in git_events {
+                            this.apply_git_event(event, cx);
+                        }
+                        for UpdaterEvent::Status(status) in updater_events {
+                            this.model.update(cx, |state, cx| {
+                                state.update_status = status;
+                                state.update_notice_dismissed = false;
+                                cx.notify();
+                            });
+                        }
+                        if changed {
                             cx.notify();
                         }
                     });
-                    for event in git_events {
-                        this.apply_git_event(event, cx);
-                    }
-                    for UpdaterEvent::Status(status) in updater_events {
-                        this.model.update(cx, |state, cx| {
-                            state.update_status = status;
-                            state.update_notice_dismissed = false;
-                            cx.notify();
-                        });
-                    }
-                    if changed {
-                        cx.notify();
-                    }
-                });
+                }
             })
             .detach();
 
@@ -579,10 +656,15 @@ impl WorkspaceView {
                 "Installing update".to_string(),
                 "Threadlane will relaunch when installation finishes.".to_string(),
             ),
-            UpdateStatus::Error(error) => (
-                "Update failed".to_string(),
-                error.chars().take(160).collect(),
-            ),
+            UpdateStatus::Error(error) => {
+                let truncated: String = error.chars().take(160).collect();
+                let suffix = if error.chars().count() > 160 {
+                    "…"
+                } else {
+                    ""
+                };
+                ("Update failed".to_string(), format!("{truncated}{suffix}"))
+            }
             _ => return None,
         };
 
@@ -854,7 +936,7 @@ impl WorkspaceView {
             .id("command-palette-backdrop")
             .absolute()
             .inset_0()
-            .bg(hsla(0.0, 0.0, 0.0, 0.5))
+            .bg(theme.background.opacity(0.5))
             .flex()
             .items_start()
             .justify_center()
@@ -932,8 +1014,8 @@ impl WorkspaceView {
             active_project_git_status(state.active_work_dir.as_deref(), &state.git_statuses);
 
         let branch = git_status
-            .and_then(|s| s.branch.as_deref())
-            .unwrap_or("main");
+            .and_then(|s| s.branch.clone())
+            .unwrap_or_else(|| "no branch".to_string());
         let (additions, deletions) = git_status.map_or((0, 0), |s| {
             s.files
                 .iter()
@@ -1431,7 +1513,7 @@ impl Render for WorkspaceView {
                             .items_center()
                             .px_2()
                             .gap_2()
-                            .overflow_x_hidden()
+                            .overflow_x_scrollbar()
                             .bg(theme.tab_bar)
                             .border_b_1()
                             .border_color(theme.border)
@@ -1485,9 +1567,9 @@ impl Render for WorkspaceView {
             .child(div().flex_1().min_h_0().child(page_content))
             .child(self.render_status_bar(cx));
 
-        let git_dialog_layer = self.right_panel.update(cx, |panel, cx| {
-            panel.render_git_dialog_layer(cx)
-        });
+        let git_dialog_layer = self
+            .right_panel
+            .update(cx, |panel, cx| panel.render_git_dialog_layer(cx));
 
         div()
             .relative()
@@ -1579,7 +1661,12 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{active_project_git_status, git_result_matches_active};
+    use super::{
+        GitEvent, WorkspacePumpEvent, active_project_git_status, git_result_matches_active,
+        next_workspace_event,
+    };
+    use crate::services::updater::UpdaterEvent;
+    use crate::state::SessionInfo;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use threadlane_git::GitStatus;
@@ -1610,5 +1697,40 @@ mod tests {
 
         assert!(git_result_matches_active(active, active));
         assert!(!git_result_matches_active(stale, active));
+    }
+
+    #[tokio::test]
+    async fn workspace_pump_waits_for_a_real_producer_event() {
+        let (_git_tx, mut git_rx) = tokio::sync::mpsc::unbounded_channel::<GitEvent>();
+        let (_updater_tx, mut updater_rx) =
+            tokio::sync::mpsc::unbounded_channel::<UpdaterEvent>();
+        let (_sessions_tx, mut sessions_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(PathBuf, Vec<SessionInfo>)>();
+        let (model_tx, mut model_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                next_workspace_event(
+                    &mut git_rx,
+                    &mut updater_rx,
+                    &mut sessions_rx,
+                    &mut model_rx,
+                ),
+            )
+            .await
+            .is_err()
+        );
+        model_tx.send(()).unwrap();
+        assert!(matches!(
+            next_workspace_event(
+                &mut git_rx,
+                &mut updater_rx,
+                &mut sessions_rx,
+                &mut model_rx,
+            )
+            .await,
+            Some(WorkspacePumpEvent::Model)
+        ));
     }
 }

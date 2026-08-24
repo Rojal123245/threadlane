@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 description = "GPUI Desktop application for Threadlane using gpui-component"
 
+[features]
+gpui-profiler = ["gpui/profiler"]
+
 [dependencies]
 gpui-component = { git = "https://github.com/longbridge/gpui-component", features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-html", "tree-sitter-css", "tree-sitter-bash", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-markdown", "tree-sitter-diff"] }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }

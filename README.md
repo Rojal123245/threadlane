@@ -195,6 +195,9 @@ RUST_LOG=threadlane_gpui=debug cargo run -p threadlane-gpui
 
 # Deep trace of agent execution loops & harness records
 RUST_LOG=threadlane_gpui=debug,threadlane_agent=trace cargo run -p threadlane-gpui
+
+# GPUI frame-time overlay (current, slowest 1%/10%, max, and frame count)
+THREADLANE_GPUI_PROFILE=1 cargo run -p threadlane-gpui --features gpui-profiler
 ```
 
 ---

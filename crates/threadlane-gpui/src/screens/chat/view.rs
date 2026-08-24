@@ -24,7 +24,10 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable, WindowExt
 
 use crate::app::{actions::AppAction, controller};
 use crate::screens::editor::EditorView;
-use crate::state::{AppState, ChatMessageInfo, MessageRole, ToolActivityInfo, TrajectoryEntry};
+use crate::state::{
+    AppState, ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityInfo,
+    SubagentActivityStatus, ToolActivityInfo, TrajectoryEntry,
+};
 
 #[derive(Clone, Debug)]
 struct ContextMeterContext {
@@ -75,6 +78,29 @@ impl Selectable for ContextMeterTrigger {
 }
 
 impl RenderOnce for ContextMeterTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        self.toggle.checked(self.selected)
+    }
+}
+
+#[derive(IntoElement)]
+struct SubagentPopoverTrigger {
+    toggle: Toggle,
+    selected: bool,
+}
+
+impl Selectable for SubagentPopoverTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for SubagentPopoverTrigger {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         self.toggle.checked(self.selected)
     }
@@ -147,7 +173,7 @@ fn context_meter_view_model(
         provisional: context.provisional,
     }
 }
-use threadlane_session::commands::{available_slash_commands, SlashCommandInfo};
+use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
 use threadlane_session::{ImageAttachment, PlanItemStatus, ReasoningEffort, SessionPlan};
 
 actions!(threadlane_composer, [PasteClipboard]);
@@ -156,6 +182,10 @@ const INPUT_KEY_CONTEXT: &str = "Input";
 
 const CHAT_CONTENT_MAX_WIDTH: f32 = 1040.0;
 const USER_BUBBLE_MAX_WIDTH: f32 = 680.0;
+
+/// Context-window usage thresholds where the meter shifts to warning/danger colors.
+const CONTEXT_METER_WARN_PCT: f64 = 80.0;
+const CONTEXT_METER_DANGER_PCT: f64 = 95.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CentralTab {
@@ -236,6 +266,12 @@ struct MarkdownRenderState {
     state: Entity<TextViewState>,
 }
 
+const MARKDOWN_CACHE_ENTRY_LIMIT: usize = 512;
+
+fn markdown_cache_exceeded(entry_count: usize) -> bool {
+    entry_count > MARKDOWN_CACHE_ENTRY_LIMIT
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TranscriptRow {
     Message(usize),
@@ -284,17 +320,136 @@ fn grouped_tool_activities(
         .filter(|activity| activity.title != "update_plan")
 }
 
+fn subagent_popover_counts(
+    statuses: impl IntoIterator<Item = SubagentActivityStatus>,
+) -> Option<(usize, usize)> {
+    let (count, active_count) = statuses
+        .into_iter()
+        .fold((0, 0), |(count, active), status| {
+            (
+                count + 1,
+                active
+                    + usize::from(matches!(
+                        status,
+                        SubagentActivityStatus::Queued | SubagentActivityStatus::Running
+                    )),
+            )
+        });
+    (count > 0).then_some((count, active_count))
+}
+
 fn format_trajectory_raw_json(entry: &TrajectoryEntry) -> String {
     serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.detail.clone())
+}
+
+#[cfg(test)]
+fn reconcile_trajectory_entries(
+    cached: Vec<TrajectoryEntry>,
+    source: &[TrajectoryEntry],
+) -> Vec<TrajectoryEntry> {
+    reconcile_trajectory_entries_with_append(cached, source).0
+}
+
+fn reconcile_trajectory_entries_with_append(
+    mut cached: Vec<TrajectoryEntry>,
+    source: &[TrajectoryEntry],
+) -> (Vec<TrajectoryEntry>, bool) {
+    if source.starts_with(&cached) {
+        cached.extend_from_slice(&source[cached.len()..]);
+        (cached, true)
+    } else {
+        (source.to_vec(), false)
+    }
+}
+
+fn reconcile_trajectory_entries_by_epoch(
+    mut cached: Vec<TrajectoryEntry>,
+    source: &[TrajectoryEntry],
+    cached_epoch: u64,
+    source_epoch: u64,
+) -> (Vec<TrajectoryEntry>, bool) {
+    if cached_epoch == source_epoch && source.len() >= cached.len() {
+        cached.extend_from_slice(&source[cached.len()..]);
+        (cached, true)
+    } else {
+        reconcile_trajectory_entries_with_append(cached, source)
+    }
+}
+
+fn contains_case_insensitive(haystack: &str, lowercase_query: &str) -> bool {
+    if lowercase_query.is_empty() {
+        return true;
+    }
+    if lowercase_query.is_ascii() && haystack.is_ascii() {
+        return haystack
+            .as_bytes()
+            .windows(lowercase_query.len())
+            .any(|window| window.eq_ignore_ascii_case(lowercase_query.as_bytes()));
+    }
+    haystack.to_lowercase().contains(lowercase_query)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TrajectoryCacheKey {
     revision: u64,
+    epoch: u64,
     mode: TrajectoryMode,
     query: String,
     category: Option<String>,
     lane: Option<String>,
+}
+
+fn extend_trajectory_facets(
+    categories: &mut Vec<String>,
+    lane_latest: &mut std::collections::BTreeMap<String, String>,
+    filtered_indices: &mut Vec<usize>,
+    entries: &[TrajectoryEntry],
+    start: usize,
+    key: &TrajectoryCacheKey,
+) {
+    for (index, entry) in entries.iter().enumerate().skip(start) {
+        if let Err(position) = categories.binary_search(&entry.category) {
+            categories.insert(position, entry.category.clone());
+        }
+        if let Some(lane) = &entry.lane {
+            lane_latest.insert(lane.clone(), entry.summary.clone());
+        }
+        let matches = key
+            .category
+            .as_ref()
+            .is_none_or(|category| &entry.category == category)
+            && key
+                .lane
+                .as_ref()
+                .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
+            && [
+                entry.category.as_str(),
+                entry.summary.as_str(),
+                entry.detail.as_str(),
+                entry.lane.as_deref().unwrap_or(""),
+                entry.correlation_id.as_deref().unwrap_or(""),
+            ]
+            .iter()
+            .any(|value| contains_case_insensitive(value, &key.query));
+        if matches {
+            filtered_indices.push(index);
+        }
+    }
+}
+
+fn extend_trajectory_previews(
+    previews: &mut Vec<SharedString>,
+    entries: &[TrajectoryEntry],
+    start: usize,
+) {
+    previews.reserve(entries.len().saturating_sub(start));
+    previews.extend(entries[start..].iter().map(|entry| {
+        if entry.detail.trim().is_empty() {
+            entry.summary.clone().into()
+        } else {
+            format!("{}  {}", entry.summary, entry.detail.replace('\n', " ")).into()
+        }
+    }));
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -311,10 +466,26 @@ fn build_trajectory_rows(
     mode: TrajectoryMode,
 ) -> Vec<TrajectoryRow> {
     let mut rows = Vec::with_capacity(filtered_indices.len());
-    let mut previous_turn = None;
-    let mut previous_request = None;
-    let mut request_input_seen = false;
-    for &all_index in filtered_indices {
+    extend_trajectory_rows(&mut rows, all_entries, filtered_indices, 0, mode);
+    rows
+}
+
+fn extend_trajectory_rows(
+    rows: &mut Vec<TrajectoryRow>,
+    all_entries: &[TrajectoryEntry],
+    filtered_indices: &[usize],
+    start: usize,
+    mode: TrajectoryMode,
+) {
+    let previous = start
+        .checked_sub(1)
+        .and_then(|index| filtered_indices.get(index))
+        .map(|&index| &all_entries[index]);
+    let mut previous_turn = previous.and_then(|entry| entry.turn);
+    let mut previous_request = previous.and_then(|entry| entry.request);
+    let mut request_input_seen = previous_request.is_some();
+    rows.reserve(filtered_indices.len().saturating_sub(start));
+    for &all_index in &filtered_indices[start..] {
         let entry = &all_entries[all_index];
         if mode == TrajectoryMode::Requests && entry.request != previous_request {
             if let Some(request) = entry.request {
@@ -337,12 +508,12 @@ fn build_trajectory_rows(
         }
         rows.push(TrajectoryRow::Entry(all_index));
     }
-    rows
 }
 
 #[derive(Default)]
 struct TrajectorySummary {
     overview_positions: [HashSet<usize>; 3],
+    overview_prefix: [Vec<u32>; 3],
     tool_count: usize,
     total_duration_ms: u64,
     anomaly_count: usize,
@@ -351,24 +522,32 @@ struct TrajectorySummary {
 
 fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
     let mut summary = TrajectorySummary::default();
-    for (index, entry) in entries.iter().enumerate() {
-        let position = index * 48 / entries.len().max(1);
-        if matches!(
-            entry.category.as_str(),
-            "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
-        ) {
-            summary.overview_positions[0].insert(position);
+    extend_trajectory_summary(&mut summary, entries);
+    summary
+}
+
+fn extend_trajectory_summary(summary: &mut TrajectorySummary, entries: &[TrajectoryEntry]) {
+    for prefix in &mut summary.overview_prefix {
+        if prefix.is_empty() {
+            prefix.push(0);
         }
-        if matches!(
-            entry.category.as_str(),
-            "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
-        ) {
-            summary.overview_positions[1].insert(position);
+    }
+    for entry in entries {
+        let groups = [
+            matches!(
+                entry.category.as_str(),
+                "Input" | "Context" | "Context Manifest" | "Queue" | "Request"
+            ),
+            matches!(
+                entry.category.as_str(),
+                "Operation" | "Step" | "Retry" | "Turn" | "Error" | "Provider" | "Anomaly"
+            ),
+            matches!(entry.category.as_str(), "Tool" | "Tool runtime"),
+        ];
+        for (prefix, present) in summary.overview_prefix.iter_mut().zip(groups) {
+            prefix.push(prefix.last().copied().unwrap_or_default() + u32::from(present));
         }
-        if matches!(entry.category.as_str(), "Tool" | "Tool runtime") {
-            summary.overview_positions[2].insert(position);
-            summary.tool_count += 1;
-        }
+        summary.tool_count += usize::from(groups[2]);
         summary.total_duration_ms = summary
             .total_duration_ms
             .saturating_add(entry.diagnostics.duration_ms.unwrap_or_default());
@@ -376,7 +555,21 @@ fn summarize_trajectory(entries: &[TrajectoryEntry]) -> TrajectorySummary {
             usize::from(entry.diagnostics.is_anomaly || entry.category == "Anomaly");
         summary.max_turn = summary.max_turn.max(entry.turn.unwrap_or_default());
     }
-    summary
+    let entry_count = summary.overview_prefix[0].len().saturating_sub(1);
+    for (positions, prefix) in summary
+        .overview_positions
+        .iter_mut()
+        .zip(&summary.overview_prefix)
+    {
+        positions.clear();
+        for position in 0..48 {
+            let start = (position * entry_count).div_ceil(48);
+            let end = ((position + 1) * entry_count).div_ceil(48);
+            if prefix[end] > prefix[start] {
+                positions.insert(position);
+            }
+        }
+    }
 }
 
 struct TrajectoryRenderCache {
@@ -386,6 +579,7 @@ struct TrajectoryRenderCache {
     lanes: Arc<Vec<String>>,
     lane_latest: Arc<std::collections::BTreeMap<String, String>>,
     filtered_indices: Vec<usize>,
+    previews: Vec<SharedString>,
     rows: Vec<TrajectoryRow>,
     summary: TrajectorySummary,
 }
@@ -410,7 +604,8 @@ pub struct ChatListView {
     transcript_generating: bool,
     trajectory_list_state: ListState,
     expanded_activity_groups: HashSet<String>,
-    markdown_states: HashMap<String, MarkdownRenderState>,
+    markdown_states: HashMap<(SharedString, String), MarkdownRenderState>,
+    markdown_cache_namespace: SharedString,
     pasted_images: Vec<ImageAttachment>,
     last_session_key: Option<(std::path::PathBuf, String)>,
     initial_scroll_frames: u8,
@@ -431,7 +626,22 @@ pub struct ChatListView {
         Vec<SlashCommandInfo>,
     )>,
     context_meter_open: bool,
+    subagents_popover_open: bool,
+    selected_subagent_run_id: Option<String>,
     _subscriptions: Vec<Subscription>,
+}
+
+async fn next_chat_stream_batch(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<ChatStreamEvent>,
+) -> Option<Vec<ChatStreamEvent>> {
+    let mut events = vec![receiver.recv().await?];
+    while events.len() < 128 {
+        let Ok(event) = receiver.try_recv() else {
+            break;
+        };
+        events.push(event);
+    }
+    Some(events)
 }
 
 impl ChatListView {
@@ -453,6 +663,9 @@ impl ChatListView {
 
         let trajectory_search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search trajectory…"));
+        let mut stream_rx = model
+            .update(cx, |state, _cx| state.stream_rx.take())
+            .expect("chat stream receiver was already taken");
 
         let editor = cx.new(|cx| EditorView::new(model.clone(), window, cx));
 
@@ -534,36 +747,19 @@ impl ChatListView {
 
         let stream_model = model.clone();
         cx.spawn(async move |this, cx| {
-            let mut settle_frames = 0_u8;
-            loop {
-                // Event-driven pacing: check quickly when generating,
-                // slow down when idle.
-                let interval = if settle_frames > 0 {
-                    Duration::from_millis(30) // ~33fps for smooth streaming without UI thread starvation
-                } else {
-                    Duration::from_millis(100)
-                };
-                cx.background_executor().timer(interval).await;
-
-                let has_event =
-                    stream_model.read_with(cx, |state, _cx| state.chat_stream_pending());
-                let changed = has_event
-                    && stream_model.update(cx, |state, cx| {
-                        let changed = state.drain_chat_stream();
-                        if changed {
-                            cx.notify();
-                        }
-                        changed
-                    });
-
-                if changed {
-                    // Markdown measurement and new rows can complete after the first redraw.
-                    settle_frames = 6;
-                }
-
-                if !changed && settle_frames > 0 {
+            while let Some(events) = next_chat_stream_batch(&mut stream_rx).await {
+                let changed = stream_model.update(cx, |state, cx| {
+                    let changed = state.drain_chat_stream(events);
+                    if changed {
+                        cx.notify();
+                    }
+                    changed
+                });
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+                if changed && stream_rx.is_empty() {
                     let _ = this.update(cx, |_this, cx| cx.notify());
-                    settle_frames = settle_frames.saturating_sub(1);
                 }
             }
         })
@@ -585,6 +781,7 @@ impl ChatListView {
             trajectory_list_state,
             expanded_activity_groups: HashSet::new(),
             markdown_states: HashMap::new(),
+            markdown_cache_namespace: SharedString::from(""),
             pasted_images: Vec::new(),
             last_session_key: None,
             initial_scroll_frames: 0,
@@ -601,6 +798,8 @@ impl ChatListView {
             trajectory_raw_json: None,
             slash_command_cache: None,
             context_meter_open: false,
+            subagents_popover_open: false,
+            selected_subagent_run_id: None,
             _subscriptions: vec![sub1, sub2, sub3, sub_editor],
         }
     }
@@ -934,11 +1133,11 @@ impl ChatListView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().colors;
-        let (marker, marker_color, is_active) = match activity.category.as_str() {
-            "Error" => ("!", theme.danger, false),
-            "Working" | "Thinking" => ("◌", theme.primary, true),
-            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success, false),
-            _ => ("✓", theme.muted_foreground, false),
+        let (marker, marker_color) = match activity.category.as_str() {
+            "Error" => ("!", theme.danger),
+            "Working" | "Thinking" => ("◌", theme.primary),
+            "Completed" | "Edited" | "Created" | "Ran" | "Loaded" => ("✓", theme.success),
+            _ => ("✓", theme.muted_foreground),
         };
         let model = self.model.clone();
         let tool_call_id = activity.id.clone();
@@ -983,23 +1182,7 @@ impl ChatListView {
                             .font_weight(FontWeight::BOLD)
                             .text_color(marker_color)
                             .child(marker);
-                        if is_active {
-                            marker_el
-                                .with_animation(
-                                    SharedString::from(format!("tool-pulse-{}", activity.id)),
-                                    Animation::new(Duration::from_millis(1000))
-                                        .repeat()
-                                        .with_easing(ease_in_out),
-                                    |el, delta| {
-                                        el.opacity(
-                                            0.3 + 0.7 * (delta * std::f32::consts::PI).sin().abs(),
-                                        )
-                                    },
-                                )
-                                .into_any_element()
-                        } else {
-                            marker_el.into_any_element()
-                        }
+                        marker_el.into_any_element()
                     })
                     .child(
                         div()
@@ -1121,17 +1304,6 @@ impl ChatListView {
                             .flex()
                             .items_center()
                             .gap(px(3.0))
-                            .with_animation(
-                                SharedString::from("working-wave-dots"),
-                                Animation::new(Duration::from_millis(1200))
-                                    .repeat()
-                                    .with_easing(ease_in_out),
-                                |el, delta| {
-                                    let opacity =
-                                        0.35 + 0.65 * (delta * std::f32::consts::PI).sin().abs();
-                                    el.opacity(opacity)
-                                },
-                            )
                             .child(div().size(px(4.5)).rounded_full().bg(theme.primary))
                             .child(div().size(px(4.5)).rounded_full().bg(theme.primary))
                             .child(div().size(px(4.5)).rounded_full().bg(theme.primary)),
@@ -1206,11 +1378,12 @@ impl ChatListView {
                     .expect("trajectory cache")
                     .all_entries[all_index];
                 let selected = Some(all_index) == self.selected_trajectory_index;
-                let preview = if entry.detail.trim().is_empty() {
-                    entry.summary.clone()
-                } else {
-                    format!("{}  {}", entry.summary, entry.detail.replace('\n', " "))
-                };
+                let preview = self
+                    .trajectory_cache
+                    .as_ref()
+                    .expect("trajectory cache")
+                    .previews[all_index]
+                    .clone();
                 let (badge_bg, badge_fg, badge_label): (Hsla, Hsla, SharedString) =
                     match entry.category.as_str() {
                         "Tool" | "Tool runtime" => {
@@ -1369,9 +1542,21 @@ impl ChatListView {
     }
 
     fn render_trajectory(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let revision = self.model.read(cx).trajectory_revision();
+        let (revision, epoch) = match self.trajectory_mode {
+            TrajectoryMode::Execution | TrajectoryMode::Requests => {
+                let state = self.model.read(cx);
+                (state.trajectory_revision(), state.trajectory_epoch())
+            }
+            TrajectoryMode::ModelContext
+            | TrajectoryMode::DurableEvents
+            | TrajectoryMode::Recovery => {
+                let revision = self.model.read(cx).diagnostics_revision();
+                (revision, revision)
+            }
+        };
         let key = TrajectoryCacheKey {
             revision,
+            epoch,
             mode: self.trajectory_mode,
             query: self.trajectory_search.to_lowercase(),
             category: self.trajectory_category.clone(),
@@ -1382,65 +1567,152 @@ impl ChatListView {
             .as_ref()
             .is_none_or(|cache| cache.key != key)
         {
-            let all_entries = match self.trajectory_mode {
+            let cached_len = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(0, |cache| cache.all_entries.len());
+            let cached_filtered_len = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(0, |cache| cache.filtered_indices.len());
+            let projection_matches = self.trajectory_cache.as_ref().is_some_and(|cache| {
+                cache.key.epoch == key.epoch
+                    && cache.key.mode == key.mode
+                    && cache.key.query == key.query
+                    && cache.key.category == key.category
+                    && cache.key.lane == key.lane
+            });
+            let mut cached_summary = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.summary))
+                .unwrap_or_default();
+            let mut cached_categories = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.categories))
+                .unwrap_or_default();
+            let mut cached_lane_latest = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.lane_latest))
+                .unwrap_or_default();
+            let mut cached_filtered_indices = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.filtered_indices))
+                .unwrap_or_default();
+            let mut cached_previews = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.previews))
+                .unwrap_or_default();
+            let cached_entries = self
+                .trajectory_cache
+                .as_mut()
+                .map(|cache| std::mem::take(&mut cache.all_entries))
+                .unwrap_or_default();
+            let cached_epoch = self
+                .trajectory_cache
+                .as_ref()
+                .map_or(epoch, |cache| cache.key.epoch);
+            let (all_entries, appended) = match self.trajectory_mode {
                 TrajectoryMode::Execution | TrajectoryMode::Requests => {
-                    self.model.read(cx).active_trajectory().to_vec()
+                    let state = self.model.read(cx);
+                    reconcile_trajectory_entries_by_epoch(
+                        cached_entries,
+                        state.active_trajectory(),
+                        cached_epoch,
+                        epoch,
+                    )
                 }
                 TrajectoryMode::ModelContext => {
-                    self.model.read(cx).active_model_context_diagnostics()
+                    let source = self.model.read(cx).active_model_context_diagnostics();
+                    reconcile_trajectory_entries_with_append(cached_entries, &source)
                 }
                 TrajectoryMode::DurableEvents => {
-                    self.model.read(cx).active_durable_event_diagnostics()
+                    let source = self.model.read(cx).active_durable_event_diagnostics();
+                    reconcile_trajectory_entries_with_append(cached_entries, &source)
                 }
-                TrajectoryMode::Recovery => self.model.read(cx).active_recovery_diagnostics(),
+                TrajectoryMode::Recovery => {
+                    let source = self.model.read(cx).active_recovery_diagnostics();
+                    reconcile_trajectory_entries_with_append(cached_entries, &source)
+                }
             };
-            let mut categories = all_entries
-                .iter()
-                .map(|entry| entry.category.clone())
-                .collect::<Vec<_>>();
-            categories.sort();
-            categories.dedup();
-            let mut lane_latest = std::collections::BTreeMap::new();
-            for entry in &all_entries {
-                if let Some(lane) = &entry.lane {
-                    lane_latest.insert(lane.clone(), entry.summary.clone());
-                }
-            }
-            let lanes = lane_latest.keys().cloned().collect();
-            let filtered_indices = all_entries
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    key.category
-                        .as_ref()
-                        .is_none_or(|category| &entry.category == category)
-                        && key
-                            .lane
-                            .as_ref()
-                            .is_none_or(|lane| entry.lane.as_ref() == Some(lane))
-                        && (key.query.is_empty()
-                            || [
-                                entry.category.as_str(),
-                                entry.summary.as_str(),
-                                entry.detail.as_str(),
-                                entry.lane.as_deref().unwrap_or(""),
-                                entry.correlation_id.as_deref().unwrap_or(""),
-                            ]
-                            .iter()
-                            .any(|value| value.to_lowercase().contains(&key.query)))
-                })
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let rows = build_trajectory_rows(&all_entries, &filtered_indices, self.trajectory_mode);
-            let summary = summarize_trajectory(&all_entries);
+            let (categories, lane_latest, filtered_indices) = if projection_matches && appended {
+                extend_trajectory_facets(
+                    Arc::make_mut(&mut cached_categories),
+                    Arc::make_mut(&mut cached_lane_latest),
+                    &mut cached_filtered_indices,
+                    &all_entries,
+                    cached_len,
+                    &key,
+                );
+                (
+                    cached_categories,
+                    cached_lane_latest,
+                    cached_filtered_indices,
+                )
+            } else {
+                let mut categories = Vec::new();
+                let mut lane_latest = std::collections::BTreeMap::new();
+                let mut filtered_indices = Vec::new();
+                extend_trajectory_facets(
+                    &mut categories,
+                    &mut lane_latest,
+                    &mut filtered_indices,
+                    &all_entries,
+                    0,
+                    &key,
+                );
+                (
+                    Arc::new(categories),
+                    Arc::new(lane_latest),
+                    filtered_indices,
+                )
+            };
+            let lanes = Arc::new(lane_latest.keys().cloned().collect());
+            let previews = if projection_matches && appended {
+                extend_trajectory_previews(&mut cached_previews, &all_entries, cached_len);
+                cached_previews
+            } else {
+                let mut previews = Vec::with_capacity(all_entries.len());
+                extend_trajectory_previews(&mut previews, &all_entries, 0);
+                previews
+            };
+            let (rows, extends_previous) = if projection_matches && appended {
+                let mut rows = self
+                    .trajectory_cache
+                    .as_mut()
+                    .map(|cache| std::mem::take(&mut cache.rows))
+                    .unwrap_or_default();
+                extend_trajectory_rows(
+                    &mut rows,
+                    &all_entries,
+                    &filtered_indices,
+                    cached_filtered_len,
+                    self.trajectory_mode,
+                );
+                (rows, true)
+            } else {
+                let rows =
+                    build_trajectory_rows(&all_entries, &filtered_indices, self.trajectory_mode);
+                let extends_previous = self
+                    .trajectory_cache
+                    .as_ref()
+                    .is_some_and(|cache| rows.starts_with(&cache.rows));
+                (rows, extends_previous)
+            };
+            let summary = if projection_matches && appended {
+                extend_trajectory_summary(&mut cached_summary, &all_entries[cached_len..]);
+                cached_summary
+            } else {
+                summarize_trajectory(&all_entries)
+            };
             let previous_row_count = self
                 .trajectory_cache
                 .as_ref()
                 .map_or(0, |cache| cache.rows.len());
-            let extends_previous = self
-                .trajectory_cache
-                .as_ref()
-                .is_some_and(|cache| rows.starts_with(&cache.rows));
             if extends_previous {
                 self.trajectory_list_state.splice(
                     previous_row_count..previous_row_count,
@@ -1453,10 +1725,11 @@ impl ChatListView {
             self.trajectory_cache = Some(TrajectoryRenderCache {
                 key,
                 all_entries,
-                categories: Arc::new(categories),
-                lanes: Arc::new(lanes),
-                lane_latest: Arc::new(lane_latest),
+                categories,
+                lanes,
+                lane_latest,
                 filtered_indices,
+                previews,
                 rows,
                 summary,
             });
@@ -1617,7 +1890,7 @@ impl ChatListView {
                             Button::new("copy-trajectory-row")
                                 .ghost()
                                 .xsmall()
-                                .label("📋")
+                                .icon(IconName::Copy)
                                 .tooltip("Copy trajectory entry")
                                 .on_click({
                                     let text = format!(
@@ -1638,7 +1911,7 @@ impl ChatListView {
                             Button::new("close-trajectory-inspector")
                                 .ghost()
                                 .xsmall()
-                                .label("×")
+                                .icon(IconName::Close)
                                 .tooltip("Close inspector")
                                 .on_click(move |_, _, cx| {
                                     close_view.update(cx, |this, cx| {
@@ -2231,6 +2504,7 @@ impl ChatListView {
         source: &str,
         cx: &mut Context<Self>,
     ) -> Entity<TextViewState> {
+        let key = (self.markdown_cache_namespace.clone(), key);
         let entry = self
             .markdown_states
             .entry(key)
@@ -2261,31 +2535,30 @@ impl ChatListView {
 
     fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
         let model = self.model.clone();
-        TextView::new(state)
-            .selectable(true)
-            .on_link_click(move |url, event, _window, cx| {
-                let activate = match event {
-                    ClickEvent::Mouse(click) => {
-                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
-                    }
-                    ClickEvent::Keyboard(_) => true,
-                    ClickEvent::Touch(click) => !click.long_press,
-                };
-                if !activate {
-                    return;
+        // Selection hit-testing dominates scroll frames; whole-message copy remains available.
+        TextView::new(state).on_link_click(move |url, event, _window, cx| {
+            let activate = match event {
+                ClickEvent::Mouse(click) => {
+                    matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
                 }
+                ClickEvent::Keyboard(_) => true,
+                ClickEvent::Touch(click) => !click.long_press,
+            };
+            if !activate {
+                return;
+            }
 
-                match classify_chat_link(url) {
-                    ChatLinkTarget::Web => cx.open_url(url),
-                    ChatLinkTarget::ProjectFile(path) => {
-                        model.update(cx, |state, cx| {
-                            state.request_open_file(path);
-                            cx.notify();
-                        });
-                    }
-                    ChatLinkTarget::Rejected => {}
+            match classify_chat_link(url) {
+                ChatLinkTarget::Web => cx.open_url(url),
+                ChatLinkTarget::ProjectFile(path) => {
+                    model.update(cx, |state, cx| {
+                        state.request_open_file(path);
+                        cx.notify();
+                    });
                 }
-            })
+                ChatLinkTarget::Rejected => {}
+            }
+        })
     }
 
     fn render_reasoning_block(
@@ -2303,29 +2576,15 @@ impl ChatListView {
         let model = self.model.clone();
         let msg_id = msg.id.clone();
 
-        let icon_element = if is_streaming {
-            div()
-                .text_xs()
-                .text_color(theme.primary)
-                .with_animation(
-                    SharedString::from(format!("reasoning-pulse-{}", msg.id)),
-                    Animation::new(Duration::from_millis(1200))
-                        .repeat()
-                        .with_easing(ease_in_out),
-                    |el, delta| {
-                        let opacity = 0.4 + 0.6 * (delta * std::f32::consts::PI).sin().abs();
-                        el.opacity(opacity)
-                    },
-                )
-                .child("✦")
-                .into_any_element()
-        } else {
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("✦")
-                .into_any_element()
-        };
+        let icon_element = div()
+            .text_xs()
+            .text_color(if is_streaming {
+                theme.primary
+            } else {
+                theme.muted_foreground
+            })
+            .child("✦")
+            .into_any_element();
 
         let header = div()
             .id(SharedString::from(format!("reasoning-toggle-{}", msg.id)))
@@ -2385,11 +2644,15 @@ impl ChatListView {
                 .text_xs()
                 .text_color(theme.muted_foreground)
                 .overflow_y_scrollbar();
-            let markdown_state =
-                self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
-            container
-                .child(TextView::new(&markdown_state).selectable(true))
-                .into_any_element()
+            if is_streaming {
+                container.child(reasoning.to_owned()).into_any_element()
+            } else {
+                let markdown_state =
+                    self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
+                container
+                    .child(TextView::new(&markdown_state).selectable(true))
+                    .into_any_element()
+            }
         });
 
         Some(
@@ -2468,26 +2731,15 @@ impl ChatListView {
                             .gap_2()
                             .children(reasoning_element)
                             .children(if !msg.content.is_empty() {
-                                let markdown_state =
-                                    self.markdown_state(msg.id.clone(), &msg.content, cx);
-                                let content_element = div()
-                                    .w_full()
-                                    .text_sm()
-                                    .text_color(theme.foreground)
-                                    .child(self.chat_markdown_view(&markdown_state))
-                                    .into_any_element();
-
+                                let content = div().w_full().text_sm().text_color(theme.foreground);
                                 Some(if msg.streaming {
-                                    div()
-                                        .child(content_element)
-                                        .with_animation(
-                                            SharedString::from(format!("stream-text-{}", msg.id)),
-                                            Animation::new(Duration::from_millis(150)),
-                                            |el, delta| el.opacity(0.85 + 0.15 * delta),
-                                        )
-                                        .into_any_element()
+                                    content.child(msg.content.clone()).into_any_element()
                                 } else {
-                                    content_element.into_any_element()
+                                    let markdown_state =
+                                        self.markdown_state(msg.id.clone(), &msg.content, cx);
+                                    content
+                                        .child(self.chat_markdown_view(&markdown_state))
+                                        .into_any_element()
                                 })
                             } else {
                                 None
@@ -2869,11 +3121,354 @@ impl ChatListView {
         commands
     }
 
+    fn render_subagent_popover(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (count, active_count) = subagent_popover_counts(
+            self.model
+                .read(cx)
+                .active_subagents()
+                .iter()
+                .map(|item| item.status),
+        )?;
+        let open = self.subagents_popover_open;
+        let toggle_entity = cx.entity();
+        let sync_entity = cx.entity();
+        let content_entity = cx.entity();
+        Some(
+            Popover::new("subagents-popover")
+                .anchor(Anchor::BottomRight)
+                .appearance(false)
+                .open(open)
+                .on_open_change(move |open, _window, cx| {
+                    sync_entity.update(cx, |this, cx| {
+                        this.subagents_popover_open = *open;
+                        cx.notify();
+                    });
+                })
+                .trigger(SubagentPopoverTrigger {
+                    selected: open,
+                    toggle: Toggle::new("subagents-popover-trigger")
+                        .ghost()
+                        .rounded_full()
+                        .tooltip("View subagent activity")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(Icon::new(IconName::Bot).small())
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(count.to_string()),
+                                ),
+                        )
+                        .on_click(move |open, _window, cx| {
+                            toggle_entity.update(cx, |this, cx| {
+                                this.subagents_popover_open = *open;
+                                cx.notify();
+                            });
+                        }),
+                })
+                .content(move |_state, _window, cx| {
+                    content_entity.update(cx, |this, cx| {
+                        this.render_subagent_popover_content(active_count, cx)
+                    })
+                })
+                .into_any_element(),
+        )
+    }
+
+    fn render_subagent_popover_content(
+        &mut self,
+        active_count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let subagents = self.model.read(cx).active_subagents().to_vec();
+        let theme = cx.theme().colors;
+        let selected_run_id = self
+            .selected_subagent_run_id
+            .clone()
+            .filter(|run_id| {
+                subagents
+                    .iter()
+                    .any(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
+            })
+            .or_else(|| {
+                subagents
+                    .iter()
+                    .find(|item| item.status == SubagentActivityStatus::Running)
+                    .or_else(|| subagents.last())
+                    .and_then(|item| item.journal_run_id.clone())
+            });
+        let selected = selected_run_id.as_ref().and_then(|run_id| {
+            subagents
+                .iter()
+                .find(|item| item.journal_run_id.as_deref() == Some(run_id.as_str()))
+        });
+        let mut rows = Vec::new();
+        for (index, item) in subagents.iter().enumerate() {
+            let run_id = item
+                .journal_run_id
+                .clone()
+                .unwrap_or_else(|| format!("queued-{}-{}", item.batch_run_id, item.task_index));
+            let is_selected = selected_run_id.as_deref() == Some(run_id.as_str());
+            let (marker, color, status) = match item.status {
+                SubagentActivityStatus::Queued => ("○", theme.muted_foreground, "Queued"),
+                SubagentActivityStatus::Running => ("◌", theme.primary, "Working"),
+                SubagentActivityStatus::Completed => ("✓", theme.success, "Completed"),
+                SubagentActivityStatus::Failed => ("!", theme.danger, "Failed"),
+                SubagentActivityStatus::Cancelled => ("×", theme.warning, "Cancelled"),
+            };
+            let entity = cx.entity();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("subagent-popup-row-{index}")))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(is_selected, |row| row.bg(theme.muted))
+                    .hover(|row| row.bg(theme.muted))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.selected_subagent_run_id = Some(run_id.clone());
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .w(px(18.0))
+                            .flex_none()
+                            .text_center()
+                            .text_color(color)
+                            .font_weight(FontWeight::BOLD)
+                            .child(marker),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(item.agent.clone()),
+                                    )
+                                    .child(
+                                        div().flex_none().text_xs().text_color(color).child(status),
+                                    ),
+                            )
+                            .children(item.model.as_ref().map(|model| {
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(
+                                        crate::model_catalog::label_for(model)
+                                            .unwrap_or_else(|| model.clone()),
+                                    )
+                            }))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(if item.task.is_empty() {
+                                        item.lane.clone().unwrap_or_default()
+                                    } else {
+                                        item.task.clone()
+                                    }),
+                            ),
+                    ),
+            );
+        }
+        let detail = selected.map(|item| self.render_subagent_detail(item, cx));
+        let count_label = if active_count > 0 {
+            format!("{active_count} active")
+        } else {
+            format!("{} completed", subagents.len())
+        };
+        div()
+            .w(px(520.0))
+            .max_w(px(CHAT_CONTENT_MAX_WIDTH - 32.0))
+            .max_h(px(520.0))
+            .rounded_xl()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("Subagents"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(count_label),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .min_h(px(240.0))
+                    .child(
+                        div()
+                            .w(px(210.0))
+                            .flex_none()
+                            .p_2()
+                            .border_r_1()
+                            .border_color(theme.border)
+                            .overflow_y_scrollbar()
+                            .children(rows),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .p_3()
+                            .overflow_y_scrollbar()
+                            .children(detail),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_subagent_detail(
+        &mut self,
+        item: &SubagentActivityInfo,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().colors;
+        let status = match item.status {
+            SubagentActivityStatus::Queued => "Queued",
+            SubagentActivityStatus::Running => "Working",
+            SubagentActivityStatus::Completed => "Completed",
+            SubagentActivityStatus::Failed => "Failed",
+            SubagentActivityStatus::Cancelled => "Cancelled",
+        };
+        let messages = item
+            .messages
+            .iter()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|message| self.render_message(message, cx))
+            .collect::<Vec<_>>();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child(item.agent.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(status),
+                            ),
+                    )
+                    .when_some(item.model.as_ref(), |header, model| {
+                        header.child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground)
+                                .child(
+                                    crate::model_catalog::label_for(model)
+                                        .unwrap_or_else(|| model.clone()),
+                                ),
+                        )
+                    })
+                    .when(!item.task.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(item.task.clone()),
+                        )
+                    }),
+            )
+            .children(item.error.as_ref().map(|error| {
+                div()
+                    .p_2()
+                    .rounded_md()
+                    .bg(theme.danger.opacity(0.08))
+                    .text_xs()
+                    .text_color(theme.danger)
+                    .child(error.clone())
+            }))
+            .children(messages.is_empty().then(|| {
+                div()
+                    .py_6()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child("Waiting for progress…")
+            }))
+            .children(messages)
+            .into_any_element()
+    }
+
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().colors;
         let model = self.model.clone();
         let input_state = self.input_state.clone();
-        let (selected_model, reasoning_effort, is_generating, pending_message, active_session_id) = {
+        let (
+            selected_model,
+            reasoning_effort,
+            is_generating,
+            pending_message,
+            active_session_id,
+            session_status,
+        ) = {
             let state = self.model.read(cx);
             (
                 state.selected_model.clone(),
@@ -2881,6 +3476,7 @@ impl ChatListView {
                 state.is_generating,
                 state.active_pending_composer_message().map(str::to_owned),
                 state.active_session_id.clone(),
+                state.session_status.clone(),
             )
         };
         let (metrics, context_window) = {
@@ -2898,14 +3494,7 @@ impl ChatListView {
                 });
             (state.active_session_metrics(), context_window)
         };
-        let lane_count = self
-            .model
-            .read(cx)
-            .active_trajectory()
-            .iter()
-            .filter_map(|entry| entry.lane.as_deref())
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let subagent_count = self.model.read(cx).active_subagents().len();
         let has_prompt =
             !self.input_state.read(cx).value().trim().is_empty() || !self.pasted_images.is_empty();
         let (model_options, selected_option, project_root) = {
@@ -2916,6 +3505,7 @@ impl ChatListView {
             (options, opt, project)
         };
         let has_models = !model_options.is_empty();
+        let needs_provider = !has_models;
         let model_label = selected_option
             .as_ref()
             .map(|option| option.label.clone())
@@ -2958,6 +3548,55 @@ impl ChatListView {
                     )
             })
             .collect::<Vec<_>>();
+
+        let provider_setup_model = self.model.clone();
+        let provider_setup_banner = needs_provider.then(|| {
+            div()
+                .w_full()
+                .max_w(px(1000.0))
+                .mx_auto()
+                .mb_2()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.warning.opacity(0.45))
+                .bg(theme.warning.opacity(0.08))
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child("Connect a model provider to start"),
+                        )
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(
+                            "Add an account or API key in Settings, then choose a model here.",
+                        )),
+                )
+                .child(
+                    Button::new("composer-open-provider-settings")
+                        .icon(IconName::Settings)
+                        .label("Open Settings")
+                        .small()
+                        .primary()
+                        .on_click(move |_event, _window, cx| {
+                            provider_setup_model.update(cx, |state, cx| {
+                                controller::dispatch(state, AppAction::OpenSettings);
+                                cx.notify();
+                            });
+                        }),
+                )
+        });
 
         let pending_preview = pending_message.map(|text| {
             div()
@@ -3215,13 +3854,14 @@ impl ChatListView {
         let displayed_percent = meter.percent.unwrap_or_default();
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
             theme.muted_foreground
-        } else if displayed_percent >= 95.0 {
+        } else if displayed_percent >= CONTEXT_METER_DANGER_PCT {
             theme.danger
-        } else if displayed_percent >= 80.0 {
+        } else if displayed_percent >= CONTEXT_METER_WARN_PCT {
             theme.warning
         } else {
             theme.accent
         };
+        let subagent_popover = self.render_subagent_popover(cx);
         let context_meter_open = self.context_meter_open;
         let toggle_context_meter = cx.entity();
         let sync_context_meter = cx.entity();
@@ -3247,6 +3887,7 @@ impl ChatListView {
                     .child(
                         ProgressCircle::new("context-meter-circle")
                             .value(meter.bar_percent as f32)
+                            .loading(is_generating && meter.bar_percent == 0.0)
                             .color(meter_color)
                             .size(px(24.0)),
                     )
@@ -3306,7 +3947,7 @@ impl ChatListView {
                             .w_full()
                             .h(px(5.0))
                             .rounded_full()
-                            .bg(theme.border)
+                            .bg(theme.muted.opacity(0.8))
                             .child(
                                 div()
                                     .h_full()
@@ -3381,8 +4022,8 @@ impl ChatListView {
             let restore_session_id = stash_session_id.clone();
             let dismiss_model = stash_model.clone();
             let dismiss_session_id = stash_session_id.clone();
-            let preview_text = if draft.len() > 60 {
-                format!("{}…", &draft[..60])
+            let preview_text = if draft.chars().count() > 60 {
+                format!("{}…", draft.chars().take(60).collect::<String>())
             } else {
                 draft.clone()
             };
@@ -3498,6 +4139,50 @@ impl ChatListView {
             .pt_3()
             .pb_2()
             .bg(theme.background)
+            .children(provider_setup_banner)
+            .children(session_status.filter(|status| {
+                !status.trim().is_empty()
+                    && status != "Working…"
+                    && status != "Reconciling session…"
+            }).map(|status| {
+                let is_error = status.starts_with("Could not")
+                    || status.starts_with("Failed")
+                    || status.starts_with("Error");
+                div()
+                    .w_full()
+                    .max_w(px(1000.0))
+                    .mx_auto()
+                    .mb_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if is_error {
+                        theme.danger.opacity(0.4)
+                    } else {
+                        theme.border
+                    })
+                    .bg(if is_error {
+                        theme.danger.opacity(0.08)
+                    } else {
+                        theme.title_bar
+                    })
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(if is_error {
+                        theme.danger
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(if is_error {
+                        IconName::CircleX
+                    } else {
+                        IconName::Asterisk
+                    })
+                    .child(div().min_w_0().child(status))
+            }))
             .children(pending_preview)
             .child(
                 div()
@@ -3535,20 +4220,29 @@ impl ChatListView {
                             .child(effort_picker)
                             .child(div().flex_1())
                             .child(stash_button)
+                            .children(subagent_popover)
                             .child(context_meter)
                             .child(
                                 Button::new("send-btn")
                                     .w(px(40.0))
                                     .h(px(40.0))
-                                    .label(if is_generating { "■" } else { "↑" })
-                                    .tooltip(if is_generating {
-                                        "Stop generation"
+                                    .icon(if is_generating {
+                                        IconName::CircleX
                                     } else {
-                                        "Send message"
+                                        IconName::ArrowUp
+                                    })
+                                    .tooltip(if is_generating {
+                                        "Stop generation (Esc)"
+                                    } else if needs_provider {
+                                        "Connect a model provider in Settings before sending"
+                                    } else if has_prompt {
+                                        "Send message (Enter)"
+                                    } else {
+                                        "Type a message to send"
                                     })
                                     .when(is_generating, |button| button.danger())
                                     .when(!is_generating, |button| button.primary())
-                                    .disabled(!is_generating && !has_prompt)
+                                    .disabled(!is_generating && (!has_prompt || needs_provider))
                                     .on_click(cx.listener(move |this, _event, window, cx| {
                                         if is_generating {
                                             model.update(cx, |state, cx| {
@@ -3589,7 +4283,7 @@ impl ChatListView {
                     || metrics.tool_calls > 0
                     || billed_input_tokens > 0
                     || metrics.output_tokens > 0
-                    || lane_count > 0,
+                    || subagent_count > 0,
                 |this| {
                     this.child(
                         div()
@@ -3604,7 +4298,7 @@ impl ChatListView {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child(format!(
-                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagent lanes",
+                                "{} turns · {} tool calls{cache_hit} · {} input / {} output tokens · {} subagents",
                                 metrics.turns,
                                 metrics.tool_calls,
                                 crate::model_catalog::format_tokens(
@@ -3613,7 +4307,7 @@ impl ChatListView {
                                 crate::model_catalog::format_tokens(
                                     metrics.output_tokens.min(u64::from(u32::MAX)) as u32
                                 ),
-                                lane_count,
+                                subagent_count,
                             )),
                     )
                 },
@@ -3638,15 +4332,25 @@ impl Render for ChatListView {
         };
         let session_changed = session_key != self.last_session_key;
         if session_changed {
+            self.markdown_cache_namespace = session_key
+                .as_ref()
+                .map(|(work_dir, session_id)| {
+                    SharedString::from(format!("{}\0{session_id}", work_dir.display()))
+                })
+                .unwrap_or_else(|| SharedString::from(""));
+            if markdown_cache_exceeded(self.markdown_states.len()) {
+                self.markdown_states.clear();
+            }
             self.last_session_key = session_key;
             self.initial_scroll_frames = 6;
             self.trajectory_category = None;
             self.trajectory_lane = None;
             self.selected_trajectory_index = None;
             self.trajectory_search.clear();
-            self.markdown_states.clear();
             self.trajectory_cache = None;
             self.trajectory_raw_json = None;
+            self.subagents_popover_open = false;
+            self.selected_subagent_run_id = None;
             self.trajectory_search_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
@@ -3689,9 +4393,56 @@ impl Render for ChatListView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(
-                                "No messages in this session yet. Type a prompt below to begin.",
-                            ))
+                            .px_4()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(440.0))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap_3()
+                                    .px_6()
+                                    .py_8()
+                                    .rounded_xl()
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.title_bar)
+                                    .child(
+                                        div()
+                                            .size(px(40.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .bg(theme.primary.opacity(0.12))
+                                            .text_color(theme.primary)
+                                            .child(IconName::Bot),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_base()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child("Ready when you are"),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(320.0))
+                                            .text_center()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(
+                                                "Describe what you want to build, investigate, or fix. Threadlane can use your project context and tools to help.",
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child("Press Enter to send · Shift+Enter for a new line"),
+                                    ),
+                            )
                             .into_any_element()
                     } else {
                         div()
@@ -3737,15 +4488,74 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
-        context_meter_view_model, format_trajectory_raw_json, grouped_tool_activities,
-        summarize_trajectory, ChatLinkTarget, ContextMeterContext, ContextMeterMetrics,
-        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
+        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, build_trajectory_rows,
+        build_transcript_rows, classify_chat_link, classify_markdown_update,
+        contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
+        extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
+        format_trajectory_raw_json, grouped_tool_activities, reconcile_trajectory_entries,
+        markdown_cache_exceeded, next_chat_stream_batch, reconcile_trajectory_entries_by_epoch,
+        subagent_popover_counts, summarize_trajectory, MARKDOWN_CACHE_ENTRY_LIMIT,
     };
     use crate::state::{
-        reported_session_shape_state, ChatMessageInfo, MessageRole, ToolActivityInfo,
-        TrajectoryDiagnostics, TrajectoryEntry,
+        ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
+        TrajectoryDiagnostics, TrajectoryEntry, reported_session_shape_state,
     };
+
+    #[test]
+    fn markdown_cache_resets_only_after_its_limit() {
+        assert!(!markdown_cache_exceeded(MARKDOWN_CACHE_ENTRY_LIMIT));
+        assert!(markdown_cache_exceeded(MARKDOWN_CACHE_ENTRY_LIMIT + 1));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_batch_waits_then_caps_ready_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                next_chat_stream_batch(&mut rx),
+            )
+            .await
+            .is_err()
+        );
+        for index in 0..130 {
+            tx.send(ChatStreamEvent::Finished {
+                session_id: index.to_string(),
+                session_file: std::path::PathBuf::new(),
+            })
+            .unwrap();
+        }
+        assert_eq!(next_chat_stream_batch(&mut rx).await.unwrap().len(), 128);
+        assert_eq!(next_chat_stream_batch(&mut rx).await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn trajectory_search_matches_ascii_without_case_sensitivity() {
+        assert!(contains_case_insensitive("Read File", "read"));
+        assert!(contains_case_insensitive("TOOL-CALL-42", "call-42"));
+        assert!(!contains_case_insensitive("Write File", "read"));
+    }
+
+    #[test]
+    fn subagent_popover_counts_items_without_owning_them() {
+        assert_eq!(subagent_popover_counts([]), None);
+        assert_eq!(
+            subagent_popover_counts([
+                SubagentActivityStatus::Queued,
+                SubagentActivityStatus::Running,
+                SubagentActivityStatus::Completed,
+            ]),
+            Some((3, 2))
+        );
+    }
+
+    #[test]
+    fn trajectory_search_preserves_unicode_lowercase_matching() {
+        assert!(contains_case_insensitive("CAFÉ output", "café"));
+        assert!(contains_case_insensitive("Kelvin", "kelvin"));
+        assert!(!contains_case_insensitive("CAFÉ output", "résumé"));
+    }
 
     #[test]
     fn chat_link_classifies_web_urls_as_external() {
@@ -4063,6 +4873,111 @@ mod hot_path_tests {
     }
 
     #[test]
+    fn trajectory_cache_reuses_entries_for_append_only_updates() {
+        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let source = vec![
+            cached[0].clone(),
+            trajectory_entry("Tool", Some(1), Some(1)),
+        ];
+
+        assert_eq!(reconcile_trajectory_entries(cached, &source), source);
+    }
+
+    #[test]
+    fn trajectory_cache_replaces_entries_when_existing_data_changes() {
+        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let source = vec![trajectory_entry("Assistant", Some(1), Some(1))];
+
+        assert_eq!(reconcile_trajectory_entries(cached, &source), source);
+    }
+
+    #[test]
+    fn trajectory_epoch_distinguishes_append_from_replacement() {
+        let cached = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let appended_source = vec![
+            cached[0].clone(),
+            trajectory_entry("Tool", Some(1), Some(1)),
+        ];
+        let (entries, appended) =
+            reconcile_trajectory_entries_by_epoch(cached.clone(), &appended_source, 7, 7);
+        assert!(appended);
+        assert_eq!(entries, appended_source);
+
+        let replacement = vec![trajectory_entry("Assistant", Some(1), Some(1))];
+        let (entries, appended) = reconcile_trajectory_entries_by_epoch(cached, &replacement, 7, 8);
+        assert!(!appended);
+        assert_eq!(entries, replacement);
+    }
+
+    #[test]
+    fn trajectory_incremental_facets_match_full_rebuild() {
+        let mut input = trajectory_entry("Input", Some(1), Some(1));
+        input.lane = Some("main".into());
+        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
+        tool.lane = Some("main".into());
+        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(2));
+        anomaly.lane = Some("child".into());
+        let appended_tool = trajectory_entry("Tool", Some(1), Some(2));
+        let entries = vec![input, tool, anomaly, appended_tool];
+        let key = TrajectoryCacheKey {
+            revision: 4,
+            epoch: 1,
+            mode: TrajectoryMode::Execution,
+            query: "tool".into(),
+            category: None,
+            lane: None,
+        };
+
+        let mut incremental = (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
+        extend_trajectory_facets(
+            &mut incremental.0,
+            &mut incremental.1,
+            &mut incremental.2,
+            &entries[..2],
+            0,
+            &key,
+        );
+        extend_trajectory_facets(
+            &mut incremental.0,
+            &mut incremental.1,
+            &mut incremental.2,
+            &entries,
+            2,
+            &key,
+        );
+
+        let mut rebuilt = (Vec::new(), std::collections::BTreeMap::new(), Vec::new());
+        extend_trajectory_facets(
+            &mut rebuilt.0,
+            &mut rebuilt.1,
+            &mut rebuilt.2,
+            &entries,
+            0,
+            &key,
+        );
+        assert_eq!(incremental, rebuilt);
+        assert_eq!(incremental.0, vec!["Anomaly", "Input", "Tool"]);
+        assert_eq!(incremental.2, vec![1, 3]);
+    }
+
+    #[test]
+    fn trajectory_previews_extend_without_reformatting_existing_entries() {
+        let mut input = trajectory_entry("Input", Some(1), Some(1));
+        input.summary = "Prompt".into();
+        input.detail = "first\nsecond".into();
+        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
+        tool.summary = "read_file".into();
+        tool.detail.clear();
+        let entries = vec![input, tool];
+        let mut previews = Vec::new();
+
+        extend_trajectory_previews(&mut previews, &entries[..1], 0);
+        extend_trajectory_previews(&mut previews, &entries, 1);
+
+        assert_eq!(previews, ["Prompt  first second", "read_file"]);
+    }
+
+    #[test]
     fn trajectory_rows_preserve_request_headers_and_setup_boundaries() {
         let entries = vec![
             trajectory_entry("Provider", Some(1), Some(1)),
@@ -4084,6 +4999,36 @@ mod hot_path_tests {
     }
 
     #[test]
+    fn trajectory_incremental_rows_match_full_rebuild() {
+        let entries = vec![
+            trajectory_entry("Provider", Some(1), Some(1)),
+            trajectory_entry("Input", Some(1), Some(1)),
+            trajectory_entry("Input", Some(2), Some(2)),
+        ];
+        let indices = [0, 1, 2];
+        let mut incremental = Vec::new();
+        extend_trajectory_rows(
+            &mut incremental,
+            &entries,
+            &indices[..2],
+            0,
+            TrajectoryMode::Requests,
+        );
+        extend_trajectory_rows(
+            &mut incremental,
+            &entries,
+            &indices,
+            2,
+            TrajectoryMode::Requests,
+        );
+
+        assert_eq!(
+            incremental,
+            build_trajectory_rows(&entries, &indices, TrajectoryMode::Requests)
+        );
+    }
+
+    #[test]
     fn trajectory_summary_is_computed_once_from_canonical_entries() {
         let mut tool = trajectory_entry("Tool", Some(1), Some(3));
         tool.diagnostics.duration_ms = Some(25);
@@ -4098,10 +5043,31 @@ mod hot_path_tests {
         assert_eq!(summary.anomaly_count, 1);
         assert_eq!(summary.max_turn, 4);
     }
+
+    #[test]
+    fn trajectory_summary_append_matches_full_rebuild() {
+        let initial = vec![trajectory_entry("Input", Some(1), Some(1))];
+        let mut tool = trajectory_entry("Tool", Some(1), Some(1));
+        tool.diagnostics.duration_ms = Some(25);
+        let mut anomaly = trajectory_entry("Anomaly", Some(1), Some(2));
+        anomaly.diagnostics.duration_ms = Some(75);
+        let appended = vec![tool, anomaly];
+        let mut incremental = summarize_trajectory(&initial);
+        extend_trajectory_summary(&mut incremental, &appended);
+
+        let rebuilt =
+            summarize_trajectory(&initial.into_iter().chain(appended).collect::<Vec<_>>());
+        assert_eq!(incremental.overview_positions, rebuilt.overview_positions);
+        assert_eq!(incremental.tool_count, rebuilt.tool_count);
+        assert_eq!(incremental.total_duration_ms, 100);
+        assert_eq!(incremental.anomaly_count, rebuilt.anomaly_count);
+        assert_eq!(incremental.max_turn, rebuilt.max_turn);
+    }
     #[test]
     fn trajectory_cache_key_changes_with_data_or_filter() {
         let base = TrajectoryCacheKey {
             revision: 7,
+            epoch: 2,
             mode: TrajectoryMode::Execution,
             query: "tool".into(),
             category: None,

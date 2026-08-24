@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender as Sender;
 
 use threadlane_session::{
-    default_global_threadlane_dir, AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpManager,
-    AcpScope, AcpSettings, ExtensionManager, ExtensionRecord, ExtensionScope, SkillManager,
-    SkillMetadata, SkillSettings,
+    AcpAgentConfig, AcpAgentRecord, AcpAgentStatus, AcpManager, AcpScope, AcpSettings,
+    ExtensionManager, ExtensionRecord, ExtensionScope, SkillManager, SkillMetadata, SkillSettings,
+    default_global_threadlane_dir,
 };
 
 fn needle_preferences_path() -> Option<PathBuf> {

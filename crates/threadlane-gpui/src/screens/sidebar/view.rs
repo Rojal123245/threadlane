@@ -1,12 +1,11 @@
-use gpui::prelude::FluentBuilder;
 use gpui::InteractiveElement;
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_component::dialog::DialogButtonProps;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::tag::{Tag, TagVariant};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Icon, IconName, Sizable, WindowExt};
@@ -104,6 +103,33 @@ enum DateGroup {
     Older,
 }
 
+#[derive(Clone)]
+enum HistoryRow {
+    Group(DateGroup),
+    Session(SessionInfo),
+}
+
+fn same_history_row_identity(left: &HistoryRow, right: &HistoryRow) -> bool {
+    match (left, right) {
+        (HistoryRow::Group(left), HistoryRow::Group(right)) => left == right,
+        (HistoryRow::Session(left), HistoryRow::Session(right)) => {
+            left.id == right.id && left.work_dir == right.work_dir
+        }
+        _ => false,
+    }
+}
+
+fn flatten_history_groups(grouped: Vec<(DateGroup, Vec<SessionInfo>)>) -> Vec<HistoryRow> {
+    grouped
+        .into_iter()
+        .filter(|(_, sessions)| !sessions.is_empty())
+        .flat_map(|(group, sessions)| {
+            std::iter::once(HistoryRow::Group(group))
+                .chain(sessions.into_iter().map(HistoryRow::Session))
+        })
+        .collect()
+}
+
 impl DateGroup {
     fn label(self) -> &'static str {
         match self {
@@ -150,7 +176,57 @@ fn format_time_ago(timestamp: u64, now: u64) -> String {
 pub struct SidebarView {
     model: Entity<AppState>,
     search_input: Entity<InputState>,
+    /// Hash of the model state the sidebar renders; lets the observer skip
+    /// notifications for streaming updates that cannot change any row.
+    history_fingerprint: u64,
+    /// Flattened, sorted rows cached per fingerprint for the virtual list.
+    history_cache: Option<(u64, Vec<HistoryRow>)>,
+    history_list_state: ListState,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Hash of every piece of `AppState` the sidebar renders. Streaming deltas
+/// mutate messages, plans, and usage without touching any of these fields, so
+/// an unchanged hash lets the observer skip `cx.notify()` entirely. The minute
+/// bucket keeps relative timestamps fresh without firing every second.
+fn sidebar_fingerprint(state: &AppState, now: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    state.active_work_dir.hash(&mut hasher);
+    state.active_session_id.hash(&mut hasher);
+    state.search_query.trim().to_lowercase().hash(&mut hasher);
+    (now / 60).hash(&mut hasher);
+    for project in &state.projects {
+        project.name.hash(&mut hasher);
+        project.work_dir.hash(&mut hasher);
+        for session in &project.sessions {
+            session.id.hash(&mut hasher);
+            session.title.hash(&mut hasher);
+            session.work_dir.hash(&mut hasher);
+            session.session_file.hash(&mut hasher);
+            session.updated_at.hash(&mut hasher);
+            session.health.hash(&mut hasher);
+            state
+                .session_is_generating(&session.session_file)
+                .hash(&mut hasher);
+        }
+    }
+    let mut git_work_dirs: Vec<&std::path::PathBuf> = state.git_statuses.keys().collect();
+    git_work_dirs.sort();
+    for work_dir in git_work_dirs {
+        work_dir.hash(&mut hasher);
+        if let Some(pr) = state.git_statuses[work_dir].pr.as_ref() {
+            pr.number.hash(&mut hasher);
+            pr.state.hash(&mut hasher);
+            pr.is_draft.hash(&mut hasher);
+            pr.total_checks.hash(&mut hasher);
+            pr.failing_checks.hash(&mut hasher);
+            pr.pending_checks.hash(&mut hasher);
+            pr.passing_checks.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 impl SidebarView {
@@ -159,10 +235,14 @@ impl SidebarView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tasks…"));
 
-        let sub1 = cx.observe(&model, |_this, _model, cx| {
-            cx.notify();
+        let sub1 = cx.observe(&model, |this, model, cx| {
+            let fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
+            if this.history_fingerprint != fingerprint {
+                this.history_fingerprint = fingerprint;
+                cx.notify();
+            }
         });
 
         let model_clone = model.clone();
@@ -180,9 +260,13 @@ impl SidebarView {
             },
         );
 
+        let history_fingerprint = sidebar_fingerprint(model.read(cx), now_unix_secs());
         Self {
             model,
             search_input,
+            history_fingerprint,
+            history_cache: None,
+            history_list_state: ListState::new(0, ListAlignment::Top, px(72.0)),
             _subscriptions: vec![sub1, sub2],
         }
     }
@@ -938,16 +1022,11 @@ impl SidebarView {
         )
     }
 
-    fn render_history(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().colors;
-        let state = self.model.read(cx);
-        let query = state.search_query.trim().to_lowercase();
-        let active_work_dir = state.active_work_dir.clone();
-        let active_session_id = state.active_session_id.clone();
-        let now = now_unix_secs();
-
-        // Filter by reference and clone only rows that will render. Grouping
-        // before sorting is equivalent to the previous global sort because
+    /// Filter, group, and sort sessions for the history list. Only runs when
+    /// `sidebar_fingerprint` changes; `render_history` otherwise reuses the
+    /// cached result instead of cloning and sorting every row per frame.
+    fn build_history_rows(&self, state: &AppState, query: &str, now: u64) -> Vec<HistoryRow> {
+        // Grouping before sorting is equivalent to a global sort because
         // bucket insertion preserves scan order.
         let mut grouped: Vec<(DateGroup, Vec<SessionInfo>)> = vec![
             (DateGroup::Today, Vec::new()),
@@ -961,8 +1040,8 @@ impl SidebarView {
             .flat_map(|project| project.sessions.iter())
         {
             if !query.is_empty()
-                && !session.title.to_lowercase().contains(&query)
-                && !session.id.to_lowercase().contains(&query)
+                && !session.title.to_lowercase().contains(query)
+                && !session.id.to_lowercase().contains(query)
             {
                 continue;
             }
@@ -986,65 +1065,173 @@ impl SidebarView {
                     .then_with(|| left.title.cmp(&right.title))
             });
         }
+        flatten_history_groups(grouped)
+    }
 
-        let mut children = Vec::new();
-        for (group, sessions) in grouped {
-            if sessions.is_empty() {
-                continue;
+    fn render_history_row(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().colors;
+        match self
+            .history_cache
+            .as_ref()
+            .and_then(|(_, rows)| rows.get(index))
+            .cloned()
+        {
+            Some(HistoryRow::Group(group)) => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .pt(if group == DateGroup::Today {
+                    px(4.0)
+                } else {
+                    px(12.0)
+                })
+                .pb_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground.opacity(0.8))
+                        .child(group.label()),
+                )
+                .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.35)))
+                .into_any_element(),
+            Some(HistoryRow::Session(session)) => {
+                let state = self.model.read(cx);
+                let is_active = state.active_work_dir.as_ref() == Some(&session.work_dir)
+                    && state.active_session_id.as_deref() == Some(session.id.as_str());
+                self.render_session_card(&session, is_active, cx)
+                    .into_any_element()
             }
-            children.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .pt(if group == DateGroup::Today {
-                        px(4.0)
-                    } else {
-                        px(12.0)
-                    })
-                    .pb_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground.opacity(0.8))
-                            .child(group.label()),
-                    )
-                    .child(div().h(px(1.0)).flex_1().bg(theme.border.opacity(0.35)))
-                    .into_any_element(),
-            );
-            for session in sessions {
-                let is_active = active_work_dir.as_ref() == Some(&session.work_dir)
-                    && active_session_id.as_deref() == Some(session.id.as_str());
-                children.push(
-                    self.render_session_card(&session, is_active, cx)
-                        .into_any_element(),
-                );
+            None => div().into_any_element(),
+        }
+    }
+
+    fn render_history(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let model = self.model.clone();
+        let state = self.model.read(cx);
+        let query = state.search_query.trim().to_lowercase();
+        let now = now_unix_secs();
+
+        let fingerprint = sidebar_fingerprint(state, now);
+        self.history_fingerprint = fingerprint;
+        let cache_matches = self
+            .history_cache
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == fingerprint);
+        if !cache_matches {
+            let rows = self.build_history_rows(state, &query, now);
+            let same_rows = self.history_cache.as_ref().is_some_and(|(_, cached)| {
+                cached.len() == rows.len()
+                    && cached
+                        .iter()
+                        .zip(&rows)
+                        .all(|(left, right)| same_history_row_identity(left, right))
+            });
+            if !same_rows {
+                self.history_list_state.reset(rows.len());
             }
+            self.history_cache = Some((fingerprint, rows));
         }
 
-        if children.is_empty() {
-            children.push(
-                div()
-                    .px_4()
-                    .py_6()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(if query.is_empty() {
-                        "No tasks yet. Start a new task above."
-                    } else {
-                        "No matching tasks."
-                    })
-                    .into_any_element(),
-            );
+        let row_count = self
+            .history_cache
+            .as_ref()
+            .map_or(0, |(_, rows)| rows.len());
+        if row_count == 0 {
+            return div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_3()
+                .px_4()
+                .py_6()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(if query.is_empty() {
+                    "No tasks yet. Start your first task."
+                } else {
+                    "No matching tasks."
+                })
+                .children(query.is_empty().then(|| {
+                    Button::new("empty-history-new-task")
+                        .icon(IconName::Plus)
+                        .label("New Task")
+                        .ghost()
+                        .small()
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, cx| {
+                                controller::dispatch(state, AppAction::BeginNewTask);
+                                cx.notify();
+                            });
+                        })
+                }))
+                .into_any_element();
         }
 
         div()
-            .flex()
-            .flex_col()
-            .children(children)
+            .relative()
+            .size_full()
+            .child(
+                list(
+                    self.history_list_state.clone(),
+                    cx.processor(Self::render_history_row),
+                )
+                .size_full()
+                .pb_3()
+                .with_sizing_behavior(ListSizingBehavior::Auto),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(gpui_component::scroll::Scrollbar::vertical(
+                        &self.history_list_state,
+                    )),
+            )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DateGroup, HistoryRow, flatten_history_groups, same_history_row_identity};
+    use crate::state::{SessionHealth, SessionInfo};
+
+    fn session(id: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.into(),
+            title: id.into(),
+            work_dir: "/project".into(),
+            session_file: format!("/project/{id}.jsonl").into(),
+            updated_at: 0,
+            health: SessionHealth::Healthy,
+        }
+    }
+
+    #[test]
+    fn history_rows_keep_group_headers_and_skip_empty_groups() {
+        let rows = flatten_history_groups(vec![
+            (DateGroup::Today, Vec::new()),
+            (DateGroup::Yesterday, vec![session("one")]),
+            (DateGroup::Older, vec![session("two")]),
+        ]);
+
+        assert!(matches!(rows[0], HistoryRow::Group(DateGroup::Yesterday)));
+        assert!(matches!(&rows[1], HistoryRow::Session(item) if item.id == "one"));
+        assert!(matches!(rows[2], HistoryRow::Group(DateGroup::Older)));
+        assert!(matches!(&rows[3], HistoryRow::Session(item) if item.id == "two"));
+        assert!(same_history_row_identity(
+            &rows[1],
+            &HistoryRow::Session(session("one"))
+        ));
+        assert!(!same_history_row_identity(&rows[1], &rows[3]));
     }
 }
 
@@ -1061,14 +1248,7 @@ impl Render for SidebarView {
             .bg(theme.title_bar)
             .child(self.render_header(cx))
             .child(self.render_history_header(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .pb_3()
-                    .child(self.render_history(cx)),
-            )
+            .child(div().flex_1().min_h_0().child(self.render_history(cx)))
             .child(self.render_footer(cx))
     }
 }

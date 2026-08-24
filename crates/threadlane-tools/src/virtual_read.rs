@@ -616,7 +616,9 @@ pub fn try_skill(root: &Path, name: &str) -> Result<String, String> {
         }
     }
 
-    Err(format!("Unknown skill reference '{clean_name}': No skill file found in workspace or user skills directories"))
+    Err(format!(
+        "Unknown skill reference '{clean_name}': No skill file found in workspace or user skills directories"
+    ))
 }
 
 pub fn try_agent(root: &Path, name: &str) -> Result<String, String> {
@@ -644,7 +646,9 @@ pub fn try_agent(root: &Path, name: &str) -> Result<String, String> {
         }
     }
 
-    Err(format!("Unknown agent reference '{clean_name}': No agent file found in workspace or user agent directories"))
+    Err(format!(
+        "Unknown agent reference '{clean_name}': No agent file found in workspace or user agent directories"
+    ))
 }
 
 #[cfg(test)]

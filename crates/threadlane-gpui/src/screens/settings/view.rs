@@ -1,11 +1,9 @@
-use std::sync::mpsc::{self, Sender};
-use std::time::Duration;
-
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::alert::{Alert, AlertVariant};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
 use gpui_component::tag::{Tag, TagVariant};
@@ -13,6 +11,7 @@ use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Selectable, Sizable};
 
 use crate::app::{actions::AppAction, controller};
+use crate::screens::next_event_batch;
 use crate::services::provider_auth::{self, ProviderAuthEvent};
 use crate::services::settings::{self, SettingsEvent};
 use crate::state::AppState;
@@ -28,6 +27,7 @@ enum SettingsPage {
     Appearance,
     Keybindings,
     Providers,
+    Subagents,
     Skills,
     Extensions,
     AcpAgents,
@@ -78,11 +78,44 @@ pub struct SettingsView {
     skill_rows: Vec<SkillMetadata>,
     acp_rows: Vec<AcpAgentRecord>,
     capability_status: Option<String>,
-    auth_tx: Sender<ProviderAuthEvent>,
-    settings_tx: Sender<SettingsEvent>,
-    auth_message: Option<String>,
+    auth_tx: tokio::sync::mpsc::UnboundedSender<ProviderAuthEvent>,
+    settings_tx: tokio::sync::mpsc::UnboundedSender<SettingsEvent>,
+    auth_message: Option<AuthStatusMessage>,
     providers_snapshot: Option<ProvidersStatusSnapshot>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum AuthStatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+#[derive(Clone)]
+struct AuthStatusMessage {
+    text: String,
+    kind: AuthStatusKind,
+}
+
+impl AuthStatusMessage {
+    fn new(text: impl Into<String>, kind: AuthStatusKind) -> Self {
+        Self {
+            text: text.into(),
+            kind,
+        }
+    }
+
+    /// Classifies a legacy free-form status string from `AppState` by content.
+    fn from_legacy(text: String) -> Self {
+        let lower = text.to_lowercase();
+        let kind = if lower.contains("failed") || lower.contains("error") {
+            AuthStatusKind::Error
+        } else {
+            AuthStatusKind::Info
+        };
+        Self { text, kind }
+    }
 }
 
 impl SettingsView {
@@ -122,43 +155,44 @@ impl SettingsView {
             InputState::new(window, cx).placeholder("npx -y @zed-industries/claude-code-acp")
         });
 
-        let (auth_tx, auth_rx) = mpsc::channel();
+        let (auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel();
         let auth_model = model.clone();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            let events = auth_rx.try_iter().collect::<Vec<_>>();
-            if events.is_empty() {
-                continue;
-            }
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    let credentials_changed = matches!(event, ProviderAuthEvent::Connected(_));
-                    this.auth_message = Some(match event {
-                        ProviderAuthEvent::Status(message)
-                        | ProviderAuthEvent::Connected(message)
-                        | ProviderAuthEvent::Error(message) => message,
-                    });
-                    if credentials_changed {
-                        auth_model.update(cx, |state, cx| {
-                            state.reconcile_selected_model();
-                            cx.notify();
+        cx.spawn(async move |this, cx| {
+            while let Some(events) = next_event_batch(&mut auth_rx).await {
+                let _ = this.update(cx, |this, cx| {
+                    for event in events {
+                        let credentials_changed = matches!(event, ProviderAuthEvent::Connected(_));
+                        this.auth_message = Some(match event {
+                            ProviderAuthEvent::Status(message) => {
+                                AuthStatusMessage::new(message, AuthStatusKind::Info)
+                            }
+                            ProviderAuthEvent::Connected(message) => {
+                                AuthStatusMessage::new(message, AuthStatusKind::Success)
+                            }
+                            ProviderAuthEvent::Error(message) => {
+                                AuthStatusMessage::new(message, AuthStatusKind::Error)
+                            }
                         });
+                        if credentials_changed {
+                            auth_model.update(cx, |state, cx| {
+                                state.reconcile_selected_model();
+                                cx.notify();
+                            });
+                        }
                     }
-                }
-                if this.page == SettingsPage::Providers {
-                    // Auth flows report completion through this pump; keep the
-                    // Providers page snapshot current without re-reading
-                    // credentials on unrelated frames.
-                    this.refresh_providers_snapshot();
-                }
-                cx.notify();
-            });
+                    if this.page == SettingsPage::Providers {
+                        // Auth flows report completion through this pump; keep the
+                        // Providers page snapshot current without re-reading
+                        // credentials on unrelated frames.
+                        this.refresh_providers_snapshot();
+                    }
+                    cx.notify();
+                });
+            }
         })
         .detach();
 
-        let (settings_tx, settings_rx) = mpsc::channel();
+        let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
         let observe_model = cx.observe(&model, |_this, _model, cx| cx.notify());
         let openai_model = model.clone();
         let save_openai = cx.subscribe_in(
@@ -203,22 +237,17 @@ impl SettingsView {
                 }
             },
         );
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            let events = settings_rx.try_iter().collect::<Vec<_>>();
-            if events.is_empty() {
-                continue;
-            }
-            let _ = this.update(cx, |this, cx| {
-                for event in events {
-                    match event {
-                        SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
+        cx.spawn(async move |this, cx| {
+            while let Some(events) = next_event_batch(&mut settings_rx).await {
+                let _ = this.update(cx, |this, cx| {
+                    for event in events {
+                        match event {
+                            SettingsEvent::AcpRefreshed(records) => this.acp_rows = records,
+                        }
                     }
-                }
-                cx.notify();
-            });
+                    cx.notify();
+                });
+            }
         })
         .detach();
 
@@ -398,6 +427,27 @@ impl SettingsView {
                             })),
                     )
                     .child(
+                        Button::new("settings-subagents")
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_start()
+                                    .gap_2()
+                                    .child(IconName::Bot)
+                                    .child("Subagents"),
+                            )
+                            .ghost()
+                            .selected(self.page == SettingsPage::Subagents)
+                            .w_full()
+                            .justify_start()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.page = SettingsPage::Subagents;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("settings-skills")
                             .child(
                                 div()
@@ -492,6 +542,155 @@ impl SettingsView {
                         }),
                 ),
             )
+    }
+
+    fn render_subagents(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().colors;
+        let state = self.model.read(cx);
+        let Some(project) = state.active_work_dir.clone() else {
+            return Self::empty_state("Attach a project to configure subagents.", theme);
+        };
+        let preferences = crate::services::subagent_settings::load(&project);
+        let selected_model = preferences.model.clone();
+        let selected_reasoning = preferences.reasoning_effort;
+        let model_label = selected_model
+            .as_deref()
+            .and_then(crate::model_catalog::label_for)
+            .unwrap_or_else(|| "Same as parent".into());
+        let reasoning_label = selected_reasoning
+            .map(|effort| effort.label())
+            .unwrap_or("Same as parent");
+        let available = crate::model_catalog::available_models_for_project(Some(&project));
+        let model_entity = self.model.clone();
+        let project_for_models = project.clone();
+        let model_picker = Button::new("subagent-model-picker")
+            .label(model_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let model_entity_for_parent = model_entity.clone();
+                let project_for_parent = project_for_models.clone();
+                available.iter().cloned().fold(
+                    menu.item(
+                        PopupMenuItem::new("Same as parent").on_click(move |_, _, cx| {
+                            let mut settings =
+                                crate::services::subagent_settings::load(&project_for_parent);
+                            settings.model = None;
+                            if crate::services::subagent_settings::save(
+                                &project_for_parent,
+                                &settings,
+                            )
+                            .is_ok()
+                            {
+                                model_entity_for_parent.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    ),
+                    |menu, option| {
+                        let model_entity = model_entity.clone();
+                        let project = project_for_models.clone();
+                        menu.item(
+                            PopupMenuItem::new(option.label)
+                                .icon(Icon::default().path(option.provider.icon_path()))
+                                .on_click(move |_, _, cx| {
+                                    let mut settings =
+                                        crate::services::subagent_settings::load(&project);
+                                    settings.model = Some(option.id.clone());
+                                    if crate::services::subagent_settings::save(&project, &settings)
+                                        .is_ok()
+                                    {
+                                        model_entity.update(cx, |state, cx| {
+                                            state.invalidate_capability_runtimes();
+                                            cx.notify();
+                                        });
+                                    }
+                                }),
+                        )
+                    },
+                )
+            });
+        let reasoning_entity = self.model.clone();
+        let project_for_reasoning = project.clone();
+        let reasoning_picker = Button::new("subagent-reasoning-picker")
+            .label(reasoning_label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let entity = reasoning_entity.clone();
+                let project = project_for_reasoning.clone();
+                [
+                    None,
+                    Some(threadlane_runtime::ReasoningEffort::Minimal),
+                    Some(threadlane_runtime::ReasoningEffort::Low),
+                    Some(threadlane_runtime::ReasoningEffort::Medium),
+                    Some(threadlane_runtime::ReasoningEffort::High),
+                ]
+                .into_iter()
+                .fold(menu, |menu, effort| {
+                    let entity = entity.clone();
+                    let project = project.clone();
+                    menu.item(
+                        PopupMenuItem::new(
+                            effort
+                                .map(|value| value.label())
+                                .unwrap_or("Same as parent"),
+                        )
+                        .on_click(move |_, _, cx| {
+                            let mut settings = crate::services::subagent_settings::load(&project);
+                            settings.reasoning_effort = effort;
+                            if crate::services::subagent_settings::save(&project, &settings).is_ok()
+                            {
+                                entity.update(cx, |state, cx| {
+                                    state.invalidate_capability_runtimes();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    )
+                })
+            });
+        let row = |title: &'static str, description: &'static str, control: AnyElement| {
+            div()
+                .rounded_xl()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.title_bar)
+                .p_4()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_1()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(description),
+                        ),
+                )
+                .child(control)
+        };
+        div()
+            .mt_5()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(row(
+                "Model",
+                "Default model for every delegated child.",
+                model_picker.into_any_element(),
+            ))
+            .child(row(
+                "Reasoning effort",
+                "Default reasoning effort for every delegated child.",
+                reasoning_picker.into_any_element(),
+            ))
+            .into_any_element()
     }
 
     fn render_general(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1130,11 +1329,18 @@ impl SettingsView {
                                     };
                                     let disconnected = result.is_ok();
                                     this.auth_message = Some(match result {
-                                        Ok(()) if antigravity => {
-                                            "Disconnected Google Antigravity.".to_string()
-                                        }
-                                        Ok(()) => "Disconnected ChatGPT.".to_string(),
-                                        Err(error) => format!("Failed to disconnect: {error}"),
+                                        Ok(()) if antigravity => AuthStatusMessage::new(
+                                            "Disconnected Google Antigravity.",
+                                            AuthStatusKind::Success,
+                                        ),
+                                        Ok(()) => AuthStatusMessage::new(
+                                            "Disconnected ChatGPT.",
+                                            AuthStatusKind::Success,
+                                        ),
+                                        Err(error) => AuthStatusMessage::new(
+                                            format!("Failed to disconnect: {error}"),
+                                            AuthStatusKind::Error,
+                                        ),
                                     });
                                     if disconnected {
                                         model.update(cx, |state, cx| {
@@ -1149,11 +1355,17 @@ impl SettingsView {
                                         provider_auth::start_chatgpt_login(this.auth_tx.clone())
                                     };
                                     this.auth_message = Some(match result {
-                                        Ok(()) if antigravity => {
-                                            "Opening Google Antigravity sign-in...".to_string()
+                                        Ok(()) if antigravity => AuthStatusMessage::new(
+                                            "Opening Google Antigravity sign-in...",
+                                            AuthStatusKind::Info,
+                                        ),
+                                        Ok(()) => AuthStatusMessage::new(
+                                            "Starting ChatGPT sign-in...",
+                                            AuthStatusKind::Info,
+                                        ),
+                                        Err(error) => {
+                                            AuthStatusMessage::new(error, AuthStatusKind::Error)
                                         }
-                                        Ok(()) => "Starting ChatGPT sign-in...".to_string(),
-                                        Err(error) => error,
                                     });
                                 }
                                 cx.notify();
@@ -1255,14 +1467,22 @@ impl SettingsView {
                             if connected {
                                 let result = provider_auth::disconnect_github();
                                 this.auth_message = Some(match result {
-                                    Ok(()) => "Disconnected GitHub.".to_string(),
-                                    Err(err) => format!("Failed to disconnect GitHub: {err}"),
+                                    Ok(()) => AuthStatusMessage::new(
+                                        "Disconnected GitHub.",
+                                        AuthStatusKind::Success,
+                                    ),
+                                    Err(err) => AuthStatusMessage::new(
+                                        format!("Failed to disconnect GitHub: {err}"),
+                                        AuthStatusKind::Error,
+                                    ),
                                 });
                             } else {
                                 let result = provider_auth::connect_github_cli(tx);
                                 if let Err(err) = result {
-                                    this.auth_message =
-                                        Some(format!("GitHub CLI connection: {err}"));
+                                    this.auth_message = Some(AuthStatusMessage::new(
+                                        format!("GitHub CLI connection: {err}"),
+                                        AuthStatusKind::Error,
+                                    ));
                                 }
                             }
                             this.refresh_providers_snapshot();
@@ -1306,8 +1526,10 @@ impl SettingsView {
                                 let _ = view.update(cx, |this, cx| {
                                     if val.trim().is_empty() {
                                         let _ = provider_auth::disconnect_github();
-                                        this.auth_message =
-                                            Some("Cleared GitHub token.".to_string());
+                                        this.auth_message = Some(AuthStatusMessage::new(
+                                            "Cleared GitHub token.",
+                                            AuthStatusKind::Success,
+                                        ));
                                     } else {
                                         let _ = provider_auth::save_github_pat(&val, tx);
                                     }
@@ -1405,8 +1627,14 @@ impl SettingsView {
                             if connected {
                                 let result = provider_auth::disconnect_gitlab();
                                 this.auth_message = Some(match result {
-                                    Ok(()) => "Disconnected GitLab.".to_string(),
-                                    Err(err) => format!("Failed to disconnect GitLab: {err}"),
+                                    Ok(()) => AuthStatusMessage::new(
+                                        "Disconnected GitLab.",
+                                        AuthStatusKind::Success,
+                                    ),
+                                    Err(err) => AuthStatusMessage::new(
+                                        format!("Failed to disconnect GitLab: {err}"),
+                                        AuthStatusKind::Error,
+                                    ),
                                 });
                                 this.refresh_providers_snapshot();
                             }
@@ -1544,10 +1772,14 @@ impl SettingsView {
                                                 let result =
                                                     provider_auth::start_chatgpt_login(auth_tx.clone());
                                                 this.auth_message = Some(match result {
-                                                    Ok(()) => {
-                                                        "Starting sign-in for additional account...".to_string()
-                                                    }
-                                                    Err(error) => error,
+                                                    Ok(()) => AuthStatusMessage::new(
+                                                        "Starting sign-in for additional account...",
+                                                        AuthStatusKind::Info,
+                                                    ),
+                                                    Err(error) => AuthStatusMessage::new(
+                                                        error,
+                                                        AuthStatusKind::Error,
+                                                    ),
                                                 });
                                                 cx.notify();
                                             });
@@ -1795,7 +2027,12 @@ impl SettingsView {
 
     fn render_providers(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().colors;
-        let state_status = self.model.read(cx).auth_status_msg.clone();
+        let state_status = self
+            .model
+            .read(cx)
+            .auth_status_msg
+            .clone()
+            .map(AuthStatusMessage::from_legacy);
         let status = self.auth_message.clone().or(state_status);
         let antigravity_connected = self
             .providers_snapshot
@@ -1813,14 +2050,29 @@ impl SettingsView {
             .bg(theme.title_bar)
             .px_4()
             .children(status.map(|status| {
+                let (bg, border, fg) = match status.kind {
+                    AuthStatusKind::Success => (
+                        theme.success.opacity(0.12),
+                        theme.success.opacity(0.4),
+                        theme.success,
+                    ),
+                    AuthStatusKind::Error => (
+                        theme.danger.opacity(0.12),
+                        theme.danger.opacity(0.4),
+                        theme.danger,
+                    ),
+                    AuthStatusKind::Info => (theme.muted, theme.border, theme.foreground),
+                };
                 div()
                     .mt_4()
                     .rounded_md()
-                    .bg(theme.muted)
+                    .border_1()
+                    .border_color(border)
+                    .bg(bg)
                     .p_3()
                     .text_xs()
-                    .text_color(theme.foreground)
-                    .child(TextView::markdown("provider-auth-status", status).selectable(true))
+                    .text_color(fg)
+                    .child(TextView::markdown("provider-auth-status", status.text).selectable(true))
             }))
             .child(self.render_chatgpt_connections(cx))
             .child(self.render_provider_connection(
@@ -2494,6 +2746,11 @@ impl Render for SettingsView {
                 "Models & Providers",
                 "Configure model providers, cloud authentication, and API credentials.",
                 self.render_providers(cx),
+            ),
+            SettingsPage::Subagents => (
+                "Subagents",
+                "Choose project defaults for delegated child model and reasoning.",
+                self.render_subagents(cx),
             ),
             SettingsPage::Skills => (
                 "Skills Catalog",

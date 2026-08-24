@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::permission::PermissionTraceEvent;
 use threadlane_runtime::compaction::{
-    compact_for_budget, estimate_request_tokens, PreparedCompaction,
+    PreparedCompaction, compact_for_budget, estimate_request_tokens,
 };
 pub use threadlane_runtime::harness::Record as HarnessRecord;
 use threadlane_runtime::harness::{
@@ -22,7 +22,7 @@ use threadlane_runtime::harness::{
     ToolExecutionPhase, ToolReplaySafety as HarnessToolReplaySafety,
     ToolResult as HarnessToolResult, ToolSpec, TraceString,
 };
-use threadlane_runtime::model_metadata::{context_budget, ContextBudget};
+use threadlane_runtime::model_metadata::{ContextBudget, context_budget};
 use threadlane_runtime::{
     AgentConfig, AgentMessage, AgentToolResult, ImageAttachment, ProviderBoundaryRequest,
     ProviderBoundaryResult, ProviderTraceEvent, ReasoningEffort, TokenUsage,
@@ -1069,7 +1069,7 @@ impl CodingSessionHarness {
                 error: error.to_string(),
             })?;
         let prompt_message = AgentMessage::user(task.to_owned(), Vec::new());
-        let prompt_entry_id = format!("subagent-entry-{}-0", identity.run_id);
+        let prompt_entry_id = format!("entry-{}-user", identity.run_id);
         let effective_parent_id = source_leaf_id
             .filter(|id| self.store.entries().iter().any(|e| e.id == *id))
             .map(str::to_owned);
@@ -1195,7 +1195,7 @@ impl CodingSessionHarness {
             session_id: self.store.session_id().to_owned(),
             run_id: identity.run_id.clone(),
             lane: identity.lane_name.clone(),
-            prompt_entry_id: format!("subagent-entry-{}-0", identity.run_id),
+            prompt_entry_id: format!("entry-{}-user", identity.run_id),
             assistant_entry_id: format!("entry-{}-assistant-1", identity.run_id),
             accepted_through_seq: self
                 .store
@@ -2041,10 +2041,14 @@ impl CodingSessionHarness {
                 .rev()
                 .find_map(|record| match record {
                     HarnessRecord::ToolStarted {
+                        lane: record_lane,
+                        run_id: record_run,
                         tool_call_id: id,
                         assistant_entry_id,
                         ..
-                    } if id == tool_call_id => Some(assistant_entry_id.clone()),
+                    } if record_lane == lane && record_run == run_id && id == tool_call_id => {
+                        Some(assistant_entry_id.clone())
+                    }
                     _ => None,
                 })
                 .or_else(|| {
@@ -3268,11 +3272,13 @@ mod tests {
         fs::set_permissions(&path, original).unwrap();
         assert!(result.is_err());
         assert_eq!(fs::read(&path).unwrap(), canonical);
-        assert!(!harness
-            .store
-            .records()
-            .iter()
-            .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. })));
+        assert!(
+            !harness
+                .store
+                .records()
+                .iter()
+                .any(|record| matches!(record, HarnessRecord::ProviderRequestStarted { .. }))
+        );
     }
 
     #[test]
@@ -3517,13 +3523,15 @@ mod tests {
                 _ => None,
             })
             .expect("abort record");
-        assert!(harness
-            .prepare_provider_boundary(
-                "run-compact",
-                boundary_request(false),
-                &AgentConfig::default(),
-            )
-            .is_err());
+        assert!(
+            harness
+                .prepare_provider_boundary(
+                    "run-compact",
+                    boundary_request(false),
+                    &AgentConfig::default(),
+                )
+                .is_err()
+        );
         assert!(!harness.store.records().iter().any(|record| {
             matches!(record, HarnessRecord::ContextCompacted { seq, .. } if *seq > abort_seq)
                 || matches!(record, HarnessRecord::ProviderRequestStarted { seq, .. } if *seq > abort_seq)
@@ -3867,6 +3875,10 @@ mod tests {
 
         assert_eq!(started.accepted.run_id, started.identity.run_id);
         assert_eq!(started.accepted.lane, started.identity.lane_name);
+        assert_eq!(
+            started.accepted.prompt_entry_id,
+            format!("entry-{}-user", started.identity.run_id)
+        );
         assert!(started.accepted.accepted_through_seq >= started.identity.started_seq);
         harness.validate_accepted_run(&started.accepted).unwrap();
 
@@ -3900,6 +3912,60 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn subagent_checkpoint_persists_tool_calls_and_results_on_child_lane() {
+        let (_dir, path) = temp_session();
+        let mut harness = CodingSessionHarness::open(&path).unwrap();
+        let parent = harness
+            .begin_run("parent-run", AgentMessage::user("parent prompt", vec![]))
+            .unwrap();
+        let started = harness
+            .start_subagent_lane("worker", "inspect", Some(&parent.prompt_entry_id))
+            .unwrap();
+        let call = threadlane_provider::openai::ToolCall {
+            id: "shared-call".into(),
+            r#type: "function".into(),
+            function: threadlane_provider::openai::ToolCallFunction {
+                name: "read_file".into(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            },
+            thought_signature: None,
+        };
+        harness
+            .checkpoint(
+                &started.identity.lane_name,
+                &started.identity.run_id,
+                &[
+                    AgentMessage::Assistant {
+                        content: None,
+                        tool_calls: Some(vec![call]),
+                        stop_reason: None,
+                        deferred_handle: None,
+                    },
+                    AgentMessage::Tool {
+                        tool_call_id: "shared-call".into(),
+                        name: "read_file".into(),
+                        content: "contents".into(),
+                        is_error: false,
+                        terminate: false,
+                    },
+                ],
+            )
+            .unwrap();
+
+        let transcript = harness.store.transcript(&started.identity.lane_name);
+        assert!(transcript.entries.iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::Assistant { tool_calls: Some(calls), .. }
+                if calls.iter().any(|call| call.id == "shared-call")
+        )));
+        assert!(transcript.entries.iter().any(|entry| matches!(
+            &entry.message,
+            AgentMessage::Tool { tool_call_id, content, .. }
+                if tool_call_id == "shared-call" && content == "contents"
+        )));
+    }
+
     #[test]
     fn invalid_subagent_source_is_not_retained_for_passive_commit() {
         let (_dir, path) = temp_session();
@@ -4220,13 +4286,15 @@ mod tests {
             .assert_model_visible(&[initial, queued.clone()])
             .unwrap();
 
-        assert!(harness
-            .store
-            .model_context("main")
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.message == queued));
+        assert!(
+            harness
+                .store
+                .model_context("main")
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.message == queued)
+        );
     }
 
     #[test]
@@ -4268,11 +4336,13 @@ mod tests {
             .assert_model_visible(&[prompt, thinking.clone()])
             .unwrap();
 
-        assert!(harness
-            .store
-            .entries()
-            .iter()
-            .any(|entry| entry.message == thinking));
+        assert!(
+            harness
+                .store
+                .entries()
+                .iter()
+                .any(|entry| entry.message == thinking)
+        );
     }
 
     #[test]

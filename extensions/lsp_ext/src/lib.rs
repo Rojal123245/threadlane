@@ -930,22 +930,20 @@ fn prepare_lsp(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>)
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             if invocation.name == "lsp_format" {
-                let formatted =
-                    apply_text_edits(state["document_text"].as_str().unwrap_or(""), &result)
-                        .map_err(Response::error)?;
-                state["document_text"] = serde_json::Value::String(formatted.clone());
-                state["phase"] = serde_json::Value::String("writing".into());
                 let path = state["path"]
                     .as_str()
-                    .ok_or_else(|| Response::error("Missing LSP document path."))?
-                    .to_owned();
-                return Ok((
-                    lsp_state_response("Applying LSP formatting edits.", state),
-                    vec![fs_request(
-                        "write_text",
-                        serde_json::json!({"path": path, "content": formatted}),
-                    )],
-                ));
+                    .ok_or_else(|| Response::error("Missing LSP document path."))?;
+                let plan = serde_json::json!({
+                    "version": 1,
+                    "kind": "lsp_workspace_edit_plan",
+                    "operation": "format",
+                    "files": [{"path": path, "text_edits": result}],
+                    "requires_atomic_apply": true
+                });
+                state["phase"] = serde_json::Value::String("ready".into());
+                let mut response = Response::ok(plan.to_string());
+                response.state = Some(state);
+                return Ok((response, vec![]));
             }
             if invocation.name == "lsp_rename_file" {
                 let from = invocation.arguments["old_path"]
@@ -986,25 +984,24 @@ fn prepare_lsp(invocation: &Invocation) -> Result<(Response, Vec<BrokerRequest>)
             }
             if invocation.name == "lsp_rename" {
                 let changes = workspace_edit_changes(&result).map_err(Response::error)?;
-                let mut pending = serde_json::Map::new();
+                let mut files = Vec::with_capacity(changes.len());
                 for (uri, edits) in changes {
-                    pending.insert(
-                        workspace_relative_path(&state, &uri).map_err(Response::error)?,
-                        edits,
-                    );
+                    files.push(serde_json::json!({
+                        "path": workspace_relative_path(&state, &uri).map_err(Response::error)?,
+                        "text_edits": edits
+                    }));
                 }
-                state["pending_edits"] = serde_json::Value::Object(pending);
-                state["phase"] = serde_json::Value::String("reading_workspace_rename".into());
-                let requests = state["pending_edits"]
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .map(|path| fs_request("read_text", serde_json::json!({"path": path})))
-                    .collect();
-                return Ok((
-                    lsp_state_response("Reading files for LSP workspace rename.", state),
-                    requests,
-                ));
+                let plan = serde_json::json!({
+                    "version": 1,
+                    "kind": "lsp_workspace_edit_plan",
+                    "operation": "rename",
+                    "files": files,
+                    "requires_atomic_apply": true
+                });
+                state["phase"] = serde_json::Value::String("ready".into());
+                let mut response = Response::ok(plan.to_string());
+                response.state = Some(state);
+                return Ok((response, vec![]));
             }
             state["phase"] = serde_json::Value::String("ready".into());
             let mut response = Response::ok(format!("{} result:\n{}", invocation.name, result));
@@ -1399,7 +1396,7 @@ fn extension_manifest() -> WasiExtensionManifest {
             },
             WasiToolDefinition {
                 name: "lsp_rename".into(),
-                description: "Safely compute and apply workspace-wide edits to rename a symbol at target location using LSP.".into(),
+                description: "Compute a structured workspace-edit plan to rename a symbol using LSP. The plan does not mutate files and must be applied atomically by the host.".into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1434,7 +1431,7 @@ fn extension_manifest() -> WasiExtensionManifest {
             },
             WasiToolDefinition {
                 name: "lsp_format".into(),
-                description: "Format a document using LSP and return its edits.".into(),
+                description: "Return a structured non-mutating workspace-edit plan for LSP document formatting.".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
             },
             WasiToolDefinition {
@@ -1518,7 +1515,13 @@ pub extern "C" fn handle_hook(ptr: i32, len: i32) -> u64 {
         .unwrap_or("");
     if !matches!(
         tool,
-        Some("write_file" | "edit_file" | "edit_file_hashline")
+        Some(
+            "write_file"
+                | "edit_file"
+                | "edit_file_hashline"
+                | "edit_files_hashline"
+                | "apply_workspace_edit_plan"
+        )
     ) || invocation
         .arguments
         .get("is_error")
@@ -1696,6 +1699,45 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("\"id\":43"));
+    }
+
+    #[test]
+    fn rename_response_returns_plan_without_filesystem_writes() {
+        let data = serde_json::json!({"jsonrpc":"2.0","id":3,"result":{"changes":{"file:///workspace/src/lib.rs":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"renamed"}]}}}).to_string();
+        let invocation = Invocation {
+            name: "lsp_rename".into(),
+            arguments: serde_json::json!({"path":"src/lib.rs","line":1,"character":1,"new_name":"renamed"}),
+            state: serde_json::json!({"phase":"requesting","server":"rust-analyzer","process_name":"lsp-rust-analyzer","workspace_root":"/workspace","path":"src/lib.rs","document_text":"old\n","request_id":3,"pending_request_id":3}),
+            events: vec![ExtensionEvent {
+                topic: "broker_response".into(),
+                payload: serde_json::json!({"capability":"process","operation":"recv","ok":true,"value":{"message":{"data":data}}}),
+            }],
+        };
+        let (response, requests) = prepare_lsp(&invocation).unwrap();
+        assert!(requests.is_empty());
+        let plan: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+        assert_eq!(plan["kind"], "lsp_workspace_edit_plan");
+        assert_eq!(plan["files"][0]["path"], "src/lib.rs");
+        assert_eq!(response.state.unwrap()["phase"], "ready");
+    }
+
+    #[test]
+    fn format_response_returns_plan_without_filesystem_writes() {
+        let data = serde_json::json!({"jsonrpc":"2.0","id":4,"result":[]}).to_string();
+        let invocation = Invocation {
+            name: "lsp_format".into(),
+            arguments: serde_json::json!({"path":"src/lib.rs"}),
+            state: serde_json::json!({"phase":"requesting","server":"rust-analyzer","process_name":"lsp-rust-analyzer","workspace_root":"/workspace","path":"src/lib.rs","document_text":"old\n","request_id":4,"pending_request_id":4}),
+            events: vec![ExtensionEvent {
+                topic: "broker_response".into(),
+                payload: serde_json::json!({"capability":"process","operation":"recv","ok":true,"value":{"message":{"data":data}}}),
+            }],
+        };
+        let (response, requests) = prepare_lsp(&invocation).unwrap();
+        assert!(requests.is_empty());
+        let plan: serde_json::Value = serde_json::from_str(&response.message).unwrap();
+        assert_eq!(plan["operation"], "format");
+        assert_eq!(response.state.unwrap()["phase"], "ready");
     }
 
     #[test]

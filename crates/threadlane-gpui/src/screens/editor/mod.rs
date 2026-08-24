@@ -1,3 +1,3 @@
 mod view;
 
-pub use view::{EditorTab, EditorView};
+pub use view::{EditorTab, EditorView, SaveFile};
