@@ -152,7 +152,7 @@ jobs:
 
   draft-release:
     name: Draft GitHub release
-    needs: [linux, macos]
+    needs: [macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -173,7 +173,6 @@ jobs:
         run: |
           test -f artifacts/Threadlane.app.tar.gz
           test -f artifacts/Threadlane.app.tar.gz.sig
-          test -n "$(find artifacts -maxdepth 1 -name 'threadlane-*.tar.gz' -print -quit)"
           test -n "$(find artifacts -maxdepth 1 -name 'Threadlane-*.dmg' -print -quit)"
           test -n "$(find artifacts -maxdepth 1 -name 'Threadlane-*.zip' -print -quit)"
           version="${RELEASE_TAG#v}"
