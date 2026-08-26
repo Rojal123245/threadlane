@@ -4499,7 +4499,7 @@ mod hot_path_tests {
     };
     use crate::state::{
         ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
-        TrajectoryDiagnostics, TrajectoryEntry, reported_session_shape_state,
+        TrajectoryDiagnostics, TrajectoryEntry,
     };
 
     #[test]
@@ -4632,26 +4632,19 @@ mod hot_path_tests {
         }
     }
 
-    #[tokio::test]
-    async fn meter_separates_current_context_from_total_processed() {
-        let (path, state) = reported_session_shape_state().await;
-        let projected_context = state.active_context_window().unwrap();
-        let projected_metrics = state.active_session_metrics();
+    #[test]
+    fn meter_separates_current_context_from_total_processed() {
         let view = context_meter_view_model(
             Some(&ContextMeterContext {
-                current_tokens: projected_context.current_tokens,
-                context_limit: projected_context.context_limit,
-                context_limit_is_estimate: projected_context.context_limit_is_estimate,
-                effective_model: projected_context.effective_model.clone(),
-                last_compaction_seq: projected_context.last_compaction_seq,
-                provisional: projected_context.provisional,
-                estimating: projected_context.estimating,
+                current_tokens: 38_278,
+                context_limit: 128_000,
+                context_limit_is_estimate: false,
+                effective_model: "gpt-4o".into(),
+                last_compaction_seq: None,
+                provisional: false,
+                estimating: false,
             }),
-            &ContextMeterMetrics {
-                billed_input_tokens: projected_metrics.billed_input_tokens(),
-                output_tokens: projected_metrics.output_tokens,
-                cache_hit_percent: projected_metrics.cache_hit_percent(),
-            },
+            &metrics_with_usage(1_071_000, 0, 10_829_000, 0),
         );
         let percent = view.percent.expect("known context percentage");
         assert!((percent - 29.904_687_5).abs() < 1e-12);
@@ -4660,7 +4653,6 @@ mod hot_path_tests {
         assert_eq!(view.total_processed_label, "11.9M");
         assert_eq!(view.cache_hit_label.as_deref(), Some("91%"));
         assert_eq!(view.detail_label, "Context usage details, 30% used");
-        std::fs::remove_file(path).ok();
     }
 
     #[test]
