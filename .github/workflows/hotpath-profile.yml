@@ -12,37 +12,60 @@ concurrency:
 
 jobs:
   profile:
+    env:
+      HOTPATH_METRICS_SERVER_OFF: 1
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: runtime
+            package: threadlane-runtime
+            example: hotpath_jsonl
+            example_path: crates/threadlane-runtime/examples/hotpath_jsonl.rs
+          - id: tools
+            package: threadlane-tools
+            example: hotpath_search
+            example_path: crates/threadlane-tools/examples/hotpath_search.rs
+          - id: mcp
+            package: threadlane-mcp
+            example: hotpath_mcp
+            example_path: crates/threadlane-mcp/examples/hotpath_mcp.rs
+          - id: terminal
+            package: threadlane-gpui
+            example: hotpath_terminal
+            example_path: crates/threadlane-gpui/examples/hotpath_terminal.rs
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: hotpath-profile
-      - run: mkdir -p /tmp/metrics
+      - run: mkdir -p /tmp/metrics/${{ matrix.id }}
       - name: Benchmark head
         env:
           HOTPATH_OUTPUT_FORMAT: json
-          HOTPATH_OUTPUT_PATH: /tmp/metrics/head.json
-        run: cargo run -p threadlane-runtime --release --example hotpath_jsonl --features hotpath
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.id }}/head.json
+        run: cargo run -p ${{ matrix.package }} --release --example ${{ matrix.example }} --features hotpath
       - name: Benchmark base
         env:
           HOTPATH_OUTPUT_FORMAT: json
-          HOTPATH_OUTPUT_PATH: /tmp/metrics/base.json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.id }}/base.json
         run: |
           git checkout --force '${{ github.event.pull_request.base.sha }}'
-          if test -f crates/threadlane-runtime/examples/hotpath_jsonl.rs; then
-            cargo run -p threadlane-runtime --release --example hotpath_jsonl --features hotpath
+          if test -f '${{ matrix.example_path }}'; then
+            cargo run -p ${{ matrix.package }} --release --example ${{ matrix.example }} --features hotpath
           else
             echo "Base branch has no Hotpath benchmark yet"
           fi
       - name: Save PR number
-        run: echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
+        run: echo '${{ github.event.pull_request.number }}' > /tmp/metrics/${{ matrix.id }}/pr_number.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: hotpath-metrics
+          name: hotpath-metrics-${{ matrix.id }}
           path: /tmp/metrics/
           retention-days: 1
