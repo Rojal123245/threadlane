@@ -3144,7 +3144,13 @@ impl AppState {
         let Some((runtime, session_id)) = self.active_session_runtime() else {
             return;
         };
-        crate::services::chat::load_acp_config_options(runtime, session_id, self.stream_tx.clone());
+        // A refusal here is not worth interrupting the user: this is a
+        // background question, and the picker simply stays as it was.
+        if let Err(error) =
+            crate::services::chat::load_acp_config_options(runtime, session_id, self.stream_tx.clone())
+        {
+            tracing::debug!("Could not load ACP agent settings: {error}");
+        }
     }
 
     /// Applies one of the selected external agent's settings.
@@ -3153,13 +3159,17 @@ impl AppState {
             self.session_status = Some("Open a session before changing agent settings".into());
             return;
         };
-        crate::services::chat::set_acp_config_option(
+        // A refusal here *is* worth surfacing: the user picked something and
+        // it did not take effect.
+        if let Err(error) = crate::services::chat::set_acp_config_option(
             runtime,
             session_id,
             config_id,
             value,
             self.stream_tx.clone(),
-        );
+        ) {
+            self.session_status = Some(error);
+        }
     }
 
     /// The active session's runtime, creating it if this is its first use.
