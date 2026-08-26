@@ -19,8 +19,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: actions/download-artifact@v4
         with:
-          name: hotpath-metrics
+          pattern: hotpath-metrics-*
           path: /tmp/metrics/
+          merge-multiple: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
       - name: Install hotpath-utils
@@ -29,13 +30,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! test -f /tmp/metrics/base.json; then
-            echo "No base metrics to compare yet"
-            exit 0
-          fi
-          hotpath-utils profile-pr \
-            --head-metrics /tmp/metrics/head.json \
-            --base-metrics /tmp/metrics/base.json \
-            --pr-number "$(cat /tmp/metrics/pr_number.txt)" \
-            --benchmark-id jsonl \
-            --github-token "$GH_TOKEN"
+          for metrics in /tmp/metrics/*; do
+            test -d "$metrics" || continue
+            if ! test -f "$metrics/base.json"; then
+              echo "No base metrics for $(basename "$metrics"); skipping"
+              continue
+            fi
+            hotpath-utils profile-pr \
+              --head-metrics "$metrics/head.json" \
+              --base-metrics "$metrics/base.json" \
+              --pr-number "$(cat "$metrics/pr_number.txt")" \
+              --benchmark-id "$(basename "$metrics")" \
+              --github-token "$GH_TOKEN"
+          done
