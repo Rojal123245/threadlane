@@ -2562,30 +2562,31 @@ impl ChatListView {
 
     fn chat_markdown_view(&self, state: &Entity<TextViewState>) -> TextView {
         let model = self.model.clone();
-        // Selection hit-testing dominates scroll frames; whole-message copy remains available.
-        TextView::new(state).on_link_click(move |url, event, _window, cx| {
-            let activate = match event {
-                ClickEvent::Mouse(click) => {
-                    matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+        TextView::new(state)
+            .selectable(true)
+            .on_link_click(move |url, event, _window, cx| {
+                let activate = match event {
+                    ClickEvent::Mouse(click) => {
+                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                    }
+                    ClickEvent::Keyboard(_) => true,
+                    ClickEvent::Touch(click) => !click.long_press,
+                };
+                if !activate {
+                    return;
                 }
-                ClickEvent::Keyboard(_) => true,
-                ClickEvent::Touch(click) => !click.long_press,
-            };
-            if !activate {
-                return;
-            }
 
-            match classify_chat_link(url) {
-                ChatLinkTarget::Web => cx.open_url(url),
-                ChatLinkTarget::ProjectFile(path) => {
-                    model.update(cx, |state, cx| {
-                        state.request_open_file(path);
-                        cx.notify();
-                    });
+                match classify_chat_link(url) {
+                    ChatLinkTarget::Web => cx.open_url(url),
+                    ChatLinkTarget::ProjectFile(path) => {
+                        model.update(cx, |state, cx| {
+                            state.request_open_file(path);
+                            cx.notify();
+                        });
+                    }
+                    ChatLinkTarget::Rejected => {}
                 }
-                ChatLinkTarget::Rejected => {}
-            }
-        })
+            })
     }
 
     fn render_reasoning_block(
