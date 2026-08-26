@@ -4540,7 +4540,10 @@ impl Render for ChatListView {
                                     self.transcript_list_state.clone(),
                                     cx.processor(Self::render_transcript_row),
                                 )
-                                .size_full()
+                                .w_full()
+                                .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                                .h_full()
+                                .mx_auto()
                                 .pt_3()
                                 .pb_6()
                                 .with_sizing_behavior(ListSizingBehavior::Auto),
@@ -4571,14 +4574,14 @@ impl Render for ChatListView {
 #[cfg(test)]
 mod hot_path_tests {
     use super::{
-        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MarkdownUpdate,
-        TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow, build_trajectory_rows,
-        build_transcript_rows, classify_chat_link, classify_markdown_update,
+        ChatLinkTarget, ContextMeterContext, ContextMeterMetrics, MARKDOWN_CACHE_ENTRY_LIMIT,
+        MarkdownUpdate, TrajectoryCacheKey, TrajectoryMode, TrajectoryRow, TranscriptRow,
+        build_trajectory_rows, build_transcript_rows, classify_chat_link, classify_markdown_update,
         contains_case_insensitive, context_meter_view_model, extend_trajectory_facets,
         extend_trajectory_previews, extend_trajectory_rows, extend_trajectory_summary,
-        format_trajectory_raw_json, grouped_tool_activities, reconcile_trajectory_entries,
-        markdown_cache_exceeded, next_chat_stream_batch, reconcile_trajectory_entries_by_epoch,
-        subagent_popover_counts, summarize_trajectory, MARKDOWN_CACHE_ENTRY_LIMIT,
+        format_trajectory_raw_json, grouped_tool_activities, markdown_cache_exceeded,
+        next_chat_stream_batch, reconcile_trajectory_entries,
+        reconcile_trajectory_entries_by_epoch, subagent_popover_counts, summarize_trajectory,
     };
     use crate::state::{
         ChatMessageInfo, ChatStreamEvent, MessageRole, SubagentActivityStatus, ToolActivityInfo,
@@ -4784,8 +4787,11 @@ mod hot_path_tests {
 
     #[test]
     fn meter_estimating_context_has_no_false_percentage() {
-        let view =
-            context_meter_view_model(Some(&estimating_context()), &ContextMeterMetrics::default(), true);
+        let view = context_meter_view_model(
+            Some(&estimating_context()),
+            &ContextMeterMetrics::default(),
+            true,
+        );
         assert_eq!(view.percent, None);
         assert_eq!(view.current_label, "Estimating…");
         assert_eq!(view.bar_percent, 0.0);
