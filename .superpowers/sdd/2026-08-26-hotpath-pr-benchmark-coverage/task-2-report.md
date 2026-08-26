@@ -55,3 +55,7 @@ The pre-change release example command supplied the red baseline. The implemente
 
 - The benchmark's hotpath metrics server may need a permitted alternate port in environments that disallow binding port 6770; this does not prevent JSON emission.
 - CI should run the supplied `hotpath-utils profile-pr` command where that utility is installed.
+
+## Cleanup
+
+After the benchmark commit, the scoped `cargo fmt` invocation had formatted 20 unrelated tracked files. The parent task explicitly authorized restoring exactly that uncommitted set to `HEAD`; the parent performed the scoped restore without touching committed Task 2 files, untracked files, or this ignored report. Final verification: `git status --short` returned no output (tracked worktree clean).
