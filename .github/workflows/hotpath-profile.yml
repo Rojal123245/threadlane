@@ -64,5 +64,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: hotpath-metrics-${{ matrix.id }}
-          path: /tmp/metrics/${{ matrix.id }}/
+          path: /tmp/metrics/
           retention-days: 1
