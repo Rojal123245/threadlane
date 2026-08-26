@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::future::Future;
@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 /// ACP major protocol version implemented by this client.
@@ -315,10 +315,6 @@ impl AcpInitializeResult {
             .as_ref()
             .map(|info| info.name.clone())
             .unwrap_or_else(|| "ACP agent".to_string())
-    }
-
-    pub fn requires_authentication(&self) -> bool {
-        !self.auth_methods.is_empty()
     }
 }
 
@@ -1596,7 +1592,6 @@ pub enum AcpAgentStatus {
     Connected {
         agent_name: String,
         protocol_version: u16,
-        auth_required: bool,
     },
     Error(String),
 }
@@ -1609,14 +1604,7 @@ impl AcpAgentStatus {
             Self::Connected {
                 agent_name,
                 protocol_version,
-                auth_required,
-            } => {
-                if *auth_required {
-                    format!("Connected to {agent_name} (ACP v{protocol_version}, sign-in required)")
-                } else {
-                    format!("Connected to {agent_name} (ACP v{protocol_version})")
-                }
-            }
+            } => format!("Connected to {agent_name} (ACP v{protocol_version})"),
             Self::Error(error) => format!("Error: {error}"),
         }
     }
@@ -1713,7 +1701,6 @@ impl AcpManager {
             Ok(result) => AcpAgentStatus::Connected {
                 agent_name: result.agent_display_name(),
                 protocol_version: result.protocol_version,
-                auth_required: result.requires_authentication(),
             },
             Err(error) => {
                 connection.shutdown().await;
@@ -2120,16 +2107,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_status_display_reports_auth_requirement() {
+    fn agent_status_display_reports_connection() {
         let connected = AcpAgentStatus::Connected {
             agent_name: "Gemini".to_string(),
             protocol_version: 1,
-            auth_required: true,
         };
-        assert_eq!(
-            connected.display_status(),
-            "Connected to Gemini (ACP v1, sign-in required)"
-        );
+        assert_eq!(connected.display_status(), "Connected to Gemini (ACP v1)");
         assert_eq!(
             AcpAgentStatus::Error("boom".to_string()).display_status(),
             "Error: boom"

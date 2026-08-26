@@ -27,11 +27,11 @@ use log::warn;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::acp::{
-    AcpClientHandler, AcpContentBlock, AcpManager, AcpPermissionOptionKind, AcpPermissionOutcome,
+    ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODEL, ACP_CONFIG_ID_AGENT, AcpClientHandler,
+    AcpConfigOption, AcpContentBlock, AcpManager, AcpPermissionOptionKind, AcpPermissionOutcome,
     AcpPermissionRequest, AcpReadTextFileRequest, AcpSession, AcpSessionNotification,
-    config_option_for, AcpConfigOption, AcpSessionUpdate, AcpStopReason, AcpToolCall, AcpWorkspaceClient,
-    AcpWriteTextFileRequest, ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODEL,
-    ACP_CONFIG_ID_AGENT,
+    AcpSessionUpdate, AcpStopReason, AcpToolCall, AcpWorkspaceClient, AcpWriteTextFileRequest,
+    config_option_for,
 };
 use crate::acp_bridge::agent_events_for;
 use crate::permission::{PermissionDecision, PermissionHandle};
@@ -229,14 +229,6 @@ impl AcpEngine {
             .start_session(agent_id, &self.work_dir, Arc::new(handler))
             .await
             .map_err(|error| start_failure_message(agent_id, &self.work_dir, &error))?;
-
-        if session.agent().requires_authentication() {
-            warn!(
-                "ACP agent '{}' reports that it requires authentication; \
-                 if the turn fails, sign in with the agent's own CLI first",
-                session.agent().agent_display_name()
-            );
-        }
 
         self.active = Some(ActiveSession {
             agent_id: agent_id.to_string(),
@@ -767,10 +759,7 @@ mod tests {
 
     #[test]
     fn a_request_without_a_tool_call_still_prompts() {
-        assert_eq!(
-            permission_title(None),
-            "The agent is requesting permission"
-        );
+        assert_eq!(permission_title(None), "The agent is requesting permission");
         assert!(!permission_detail(None).is_empty());
     }
 

@@ -626,7 +626,7 @@ impl SidebarView {
             .relative()
             .flex()
             .items_stretch()
-            .mx_2()
+            .w_full()
             .my(px(1.5))
             .rounded_md()
             .bg(bg_color)
@@ -707,6 +707,9 @@ impl SidebarView {
                                             div()
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground)
+                                                .group_hover("session-card", |style| {
+                                                    style.opacity(0.0)
+                                                })
                                                 .child(time_ago),
                                         )
                                     })
@@ -719,6 +722,9 @@ impl SidebarView {
                                         .ghost()
                                         .xsmall()
                                         .compact()
+                                        .absolute()
+                                        .right(px(10.0))
+                                        .top(px(8.0))
                                         .opacity(0.0)
                                         .group_hover("session-card", |style| style.opacity(1.0))
                                         .tooltip("Archive session")
