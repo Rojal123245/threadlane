@@ -1,4 +1,4 @@
-use threadlane_runtime::harness::{JsonlStore, Record, SessionStore};
+use threadlane_runtime::harness::{JsonlStore, MemoryStore, Record, Reducer, SessionStore};
 
 fn fact(id: String, seq: u64) -> Record {
     Record::FactSet {
@@ -42,8 +42,19 @@ fn open_scaling() {
     }
 }
 
+#[hotpath::measure]
+fn reducer_replay(store: &MemoryStore) {
+    std::hint::black_box(Reducer::reduce(store).unwrap());
+}
+
 #[hotpath::main]
 fn main() {
     append_scaling();
     open_scaling();
+
+    let mut store = MemoryStore::new("reducer-replay");
+    for seq in 1..=4_000 {
+        store.append_record(fact(format!("fact-bench-{seq}"), seq));
+    }
+    reducer_replay(&store);
 }
