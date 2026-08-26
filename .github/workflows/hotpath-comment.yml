@@ -6,6 +6,7 @@ on:
     types: [completed]
 
 permissions:
+  actions: read
   contents: read
   pull-requests: write
 
@@ -30,16 +31,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          pr_number="${{ github.event.workflow_run.pull_requests[0].number }}"
+          if test -z "$pr_number"; then
+            echo "Workflow run has no pull request; skipping"
+            exit 0
+          fi
           for metrics in /tmp/metrics/*; do
             test -d "$metrics" || continue
-            if ! test -f "$metrics/base.json"; then
-              echo "No base metrics for $(basename "$metrics"); skipping"
+            suite_id="$(basename "$metrics")"
+            case "$suite_id" in
+              runtime|tools|mcp|terminal) ;;
+              *)
+                echo "Skipping unexpected benchmark suite: $suite_id"
+                continue
+                ;;
+            esac
+            if ! test -f "$metrics/head.json" || ! test -f "$metrics/base.json"; then
+              echo "Missing metrics for $suite_id; skipping"
               continue
             fi
-            hotpath-utils profile-pr \
+            if ! hotpath-utils profile-pr \
               --head-metrics "$metrics/head.json" \
               --base-metrics "$metrics/base.json" \
-              --pr-number "$(cat "$metrics/pr_number.txt")" \
-              --benchmark-id "$(basename "$metrics")" \
-              --github-token "$GH_TOKEN"
+              --pr-number "$pr_number" \
+              --benchmark-id "$suite_id" \
+              --github-token "$GH_TOKEN"; then
+              echo "Comparison failed for $suite_id; continuing"
+            fi
           done
