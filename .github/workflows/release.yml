@@ -47,7 +47,7 @@ jobs:
 #    runs-on: ${{ matrix.runner }}
 #    timeout-minutes: 90
 #    steps:
-#      - uses: actions/checkout@v4
+#      - uses: actions/checkout@v7
 #        with:
 #          ref: ${{ env.RELEASE_TAG }}
 #
@@ -60,7 +60,7 @@ jobs:
 #            exit 1
 #          fi
 #
-#      - uses: dtolnay/rust-toolchain@1.95.0
+#      - uses: dtolnay/rust-toolchain@1.100.0
 #      - uses: Swatinem/rust-cache@v2
 #        with:
 #          key: gpui-release-${{ matrix.arch }}
@@ -84,7 +84,7 @@ jobs:
 #      - name: Bundle
 #        run: ./scripts/bundle-gpui-linux.sh
 #
-#      - uses: actions/upload-artifact@v4
+#      - uses: actions/upload-artifact@v7
 #        with:
 #          name: linux-${{ matrix.arch }}
 #          path: target/release/threadlane-*.tar.gz
@@ -95,7 +95,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -108,7 +108,7 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: gpui-release-aarch64
@@ -140,7 +140,7 @@ jobs:
           tar -czf target/release/Threadlane.app.tar.gz -C target/release Threadlane.app
           cargo packager signer sign target/release/Threadlane.app.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-aarch64
           path: |
@@ -158,11 +158,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -190,7 +190,7 @@ jobs:
           jq -e '.version and .platforms["macos-aarch64"].url and .platforms["macos-aarch64"].signature' artifacts/latest.json
           sha256sum artifacts/* > artifacts/SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Threadlane ${{ env.RELEASE_TAG }}
