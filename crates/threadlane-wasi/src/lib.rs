@@ -226,10 +226,8 @@ impl WasiExtension {
         let mut store = Store::new(&engine, WasiStoreData::default());
         let linker = Self::create_linker(&engine, &mut store);
         let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| format!("Failed to instantiate WASM module: {e}"))?
-            .start(&mut store)
-            .map_err(|e| format!("Failed to start WASM module: {e}"))?;
+            .instantiate_and_start(&mut store, &module)
+            .map_err(|e| format!("Failed to instantiate or start WASM module: {e}"))?;
 
         let manifest = match instance.get_typed_func::<(), u64>(&store, "extension_info") {
             Ok(info) => {
@@ -308,9 +306,7 @@ impl WasiExtension {
         );
         let linker = Self::create_linker(&self.engine, &mut store);
         let instance = linker
-            .instantiate(&mut store, &self.module)
-            .map_err(|e| e.to_string())?
-            .start(&mut store)
+            .instantiate_and_start(&mut store, &self.module)
             .map_err(|e| e.to_string())?;
         let memory = instance
             .get_memory(&store, "memory")
