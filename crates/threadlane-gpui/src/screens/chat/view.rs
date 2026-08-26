@@ -3821,96 +3821,6 @@ impl ChatListView {
                 })
             });
 
-        // An external ACP agent defines its own settings — Claude Code exposes a
-        // permission mode, a model, and an agent persona. They are rendered from
-        // whatever the agent advertises rather than from a fixed list, because
-        // the set is the agent's to define and differs between agents.
-        let acp_settings_picker = threadlane_session::is_acp_model(&selected_model).then(|| {
-            // The model lives in the model picker beside the other models, so
-            // this control is left with the settings that have no home there —
-            // for Claude Code, the permission mode.
-            let options = self
-                .model
-                .read(cx)
-                .active_acp_config_options()
-                .iter()
-                .filter(|option| {
-                    option.category.as_deref()
-                        != Some(threadlane_session::ACP_CONFIG_CATEGORY_MODEL)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let settings_model = self.model.clone();
-            // The permission mode is the setting with real consequences, so it
-            // labels the control; without one, the button still says what it is.
-            let label = threadlane_session::config_option_for(
-                &options,
-                threadlane_session::ACP_CONFIG_CATEGORY_MODE,
-            )
-            .and_then(threadlane_session::AcpConfigOption::current_label)
-            .unwrap_or_else(|| "Agent".to_string());
-            let connected = !options.is_empty();
-
-            Button::new("composer-acp-settings-picker")
-                .icon(IconName::Settings)
-                .label(label)
-                .tooltip(if connected {
-                    "Agent settings".to_string()
-                } else {
-                    "Agent settings — open to connect".to_string()
-                })
-                .dropdown_caret(true)
-                .ghost()
-                .dropdown_menu(move |menu, _window, _cx| {
-                    if options.is_empty() {
-                        // Settings arrive from the agent on connect, so there is
-                        // nothing truthful to list until it has started.
-                        let connect_model = settings_model.clone();
-                        return menu.item(PopupMenuItem::new("Connect to load settings").on_click(
-                            move |_event, _window, cx| {
-                                connect_model.update(cx, |state, cx| {
-                                    state.request_acp_config_options();
-                                    cx.notify();
-                                });
-                            },
-                        ));
-                    }
-                    options
-                        .iter()
-                        .enumerate()
-                        .fold(menu, |menu, (index, option)| {
-                            let menu = if index == 0 {
-                                menu
-                            } else {
-                                menu.item(PopupMenuItem::separator())
-                            };
-                            let menu = menu.item(PopupMenuItem::label(option.name.clone()));
-                            let current = option.current_value().map(str::to_string);
-                            option.options.iter().fold(menu, |menu, choice| {
-                                let model = settings_model.clone();
-                                let config_id = option.id.clone();
-                                let value = choice.value.clone();
-                                menu.item(
-                                    PopupMenuItem::new(choice.name.clone())
-                                        .checked(current.as_deref() == Some(choice.value.as_str()))
-                                        .on_click(move |_event, _window, cx| {
-                                            model.update(cx, |state, cx| {
-                                                controller::dispatch(
-                                                    state,
-                                                    AppAction::SetAcpConfigOption {
-                                                        config_id: config_id.clone(),
-                                                        value: value.clone(),
-                                                    },
-                                                );
-                                                cx.notify();
-                                            });
-                                        }),
-                                )
-                            })
-                        })
-                })
-        });
-
         let input_value = self.input_state.read(cx).value().to_string();
         let command_menu = if input_value.starts_with('/') {
             let query = input_value[1..]
@@ -4391,7 +4301,6 @@ impl ChatListView {
                             .gap_1()
                             .child(model_picker)
                             .child(effort_picker)
-                            .children(acp_settings_picker)
                             .child(div().flex_1())
                             .child(stash_button)
                             .children(subagent_popover)
