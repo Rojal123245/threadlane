@@ -58,6 +58,11 @@ struct ContextMeterViewModel {
     effective_model: Option<String>,
     last_compaction_seq: Option<u64>,
     provisional: bool,
+    /// Whether a usage figure is ever coming for this model.
+    ///
+    /// Separates "measuring" from "unmeasurable": both render without a
+    /// percentage, but only the first should show a pending animation.
+    reports_usage: bool,
 }
 
 #[derive(IntoElement)]
@@ -119,11 +124,31 @@ fn format_meter_tokens(tokens: u64) -> String {
 fn context_meter_view_model(
     context: Option<&ContextMeterContext>,
     metrics: &ContextMeterMetrics,
+    reports_usage: bool,
 ) -> ContextMeterViewModel {
     let total_processed = metrics
         .billed_input_tokens
         .saturating_add(metrics.output_tokens);
     let cache_hit_label = metrics.cache_hit_percent.map(|value| format!("{value}%"));
+
+    // An external ACP agent runs its own loop and reports no token accounting,
+    // so there is no context window to measure. Saying "Estimating…" would
+    // promise a number that never arrives, and the meter would animate for the
+    // whole turn waiting for it.
+    if !reports_usage {
+        return ContextMeterViewModel {
+            percent: None,
+            bar_percent: 0.0,
+            current_label: "Not reported".into(),
+            detail_label: "Context usage is not reported by this agent".into(),
+            total_processed_label: format_meter_tokens(total_processed),
+            cache_hit_label,
+            effective_model: None,
+            last_compaction_seq: None,
+            provisional: false,
+            reports_usage: false,
+        };
+    }
 
     let Some(context) = context else {
         return ContextMeterViewModel {
@@ -136,6 +161,7 @@ fn context_meter_view_model(
             effective_model: None,
             last_compaction_seq: None,
             provisional: false,
+            reports_usage: true,
         };
     };
 
@@ -171,6 +197,7 @@ fn context_meter_view_model(
             .then(|| context.effective_model.clone()),
         last_compaction_seq: context.last_compaction_seq,
         provisional: context.provisional,
+        reports_usage: true,
     }
 }
 use threadlane_session::commands::{SlashCommandInfo, available_slash_commands};
@@ -3510,6 +3537,27 @@ impl ChatListView {
             .as_ref()
             .map(|option| option.label.clone())
             .unwrap_or_else(|| "Connect a provider".to_string());
+        // Selecting an ACP agent picks the *agent*; the agent then picks its own
+        // model. Naming it here rather than only in the settings menu is what
+        // makes choosing a model visibly take effect, since this is the control
+        // a user reads to answer "which model am I on".
+        let model_label = match self.model.read(cx).active_acp_model_name() {
+            Some(agent_model) => format!("{model_label} · {agent_model}"),
+            None => model_label,
+        };
+        // Selecting an ACP agent picks the *agent*; the agent then runs one of
+        // its own models. Both are "which model am I on", so both belong in
+        // this one control rather than split across two.
+        let acp_model_option = threadlane_session::is_acp_model(&selected_model)
+            .then(|| {
+                threadlane_session::config_option_for(
+                    self.model.read(cx).active_acp_config_options(),
+                    threadlane_session::ACP_CONFIG_CATEGORY_MODEL,
+                )
+                .cloned()
+            })
+            .flatten();
+        let acp_model_menu_model = self.model.clone();
         let model_for_picker = self.model.clone();
         let queue_model = self.model.clone();
         let steer_model = self.model.clone();
@@ -3689,7 +3737,7 @@ impl ChatListView {
             model_picker
         };
         let model_picker = model_picker.dropdown_menu(move |menu, _window, _cx| {
-            model_options.iter().cloned().fold(menu, |menu, option| {
+            let menu = model_options.iter().cloned().fold(menu, |menu, option| {
                 let model = model_for_picker.clone();
                 menu.item(
                     PopupMenuItem::new(option.label)
@@ -3699,6 +3747,35 @@ impl ChatListView {
                                 controller::dispatch(
                                     state,
                                     AppAction::SelectModel(option.id.to_string()),
+                                );
+                                cx.notify();
+                            });
+                        }),
+                )
+            });
+            let Some(acp_model) = acp_model_option.as_ref() else {
+                return menu;
+            };
+            let current = acp_model.current_value().map(str::to_string);
+            let config_id = acp_model.id.clone();
+            let menu = menu
+                .item(PopupMenuItem::separator())
+                .item(PopupMenuItem::label(acp_model.name.clone()));
+            acp_model.options.iter().fold(menu, |menu, choice| {
+                let model = acp_model_menu_model.clone();
+                let config_id = config_id.clone();
+                let value = choice.value.clone();
+                menu.item(
+                    PopupMenuItem::new(choice.name.clone())
+                        .checked(current.as_deref() == Some(choice.value.as_str()))
+                        .on_click(move |_event, _window, cx| {
+                            model.update(cx, |state, cx| {
+                                controller::dispatch(
+                                    state,
+                                    AppAction::SetAcpConfigOption {
+                                        config_id: config_id.clone(),
+                                        value: value.clone(),
+                                    },
                                 );
                                 cx.notify();
                             });
@@ -3743,6 +3820,96 @@ impl ChatListView {
                     )
                 })
             });
+
+        // An external ACP agent defines its own settings — Claude Code exposes a
+        // permission mode, a model, and an agent persona. They are rendered from
+        // whatever the agent advertises rather than from a fixed list, because
+        // the set is the agent's to define and differs between agents.
+        let acp_settings_picker = threadlane_session::is_acp_model(&selected_model).then(|| {
+            // The model lives in the model picker beside the other models, so
+            // this control is left with the settings that have no home there —
+            // for Claude Code, the permission mode.
+            let options = self
+                .model
+                .read(cx)
+                .active_acp_config_options()
+                .iter()
+                .filter(|option| {
+                    option.category.as_deref()
+                        != Some(threadlane_session::ACP_CONFIG_CATEGORY_MODEL)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let settings_model = self.model.clone();
+            // The permission mode is the setting with real consequences, so it
+            // labels the control; without one, the button still says what it is.
+            let label = threadlane_session::config_option_for(
+                &options,
+                threadlane_session::ACP_CONFIG_CATEGORY_MODE,
+            )
+            .and_then(threadlane_session::AcpConfigOption::current_label)
+            .unwrap_or_else(|| "Agent".to_string());
+            let connected = !options.is_empty();
+
+            Button::new("composer-acp-settings-picker")
+                .icon(IconName::Settings)
+                .label(label)
+                .tooltip(if connected {
+                    "Agent settings".to_string()
+                } else {
+                    "Agent settings — open to connect".to_string()
+                })
+                .dropdown_caret(true)
+                .ghost()
+                .dropdown_menu(move |menu, _window, _cx| {
+                    if options.is_empty() {
+                        // Settings arrive from the agent on connect, so there is
+                        // nothing truthful to list until it has started.
+                        let connect_model = settings_model.clone();
+                        return menu.item(PopupMenuItem::new("Connect to load settings").on_click(
+                            move |_event, _window, cx| {
+                                connect_model.update(cx, |state, cx| {
+                                    state.request_acp_config_options();
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                    options
+                        .iter()
+                        .enumerate()
+                        .fold(menu, |menu, (index, option)| {
+                            let menu = if index == 0 {
+                                menu
+                            } else {
+                                menu.item(PopupMenuItem::separator())
+                            };
+                            let menu = menu.item(PopupMenuItem::label(option.name.clone()));
+                            let current = option.current_value().map(str::to_string);
+                            option.options.iter().fold(menu, |menu, choice| {
+                                let model = settings_model.clone();
+                                let config_id = option.id.clone();
+                                let value = choice.value.clone();
+                                menu.item(
+                                    PopupMenuItem::new(choice.name.clone())
+                                        .checked(current.as_deref() == Some(choice.value.as_str()))
+                                        .on_click(move |_event, _window, cx| {
+                                            model.update(cx, |state, cx| {
+                                                controller::dispatch(
+                                                    state,
+                                                    AppAction::SetAcpConfigOption {
+                                                        config_id: config_id.clone(),
+                                                        value: value.clone(),
+                                                    },
+                                                );
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                            })
+                        })
+                })
+        });
 
         let input_value = self.input_state.read(cx).value().to_string();
         let command_menu = if input_value.starts_with('/') {
@@ -3850,6 +4017,7 @@ impl ChatListView {
                 output_tokens: metrics.output_tokens,
                 cache_hit_percent: metrics.cache_hit_percent(),
             },
+            !threadlane_session::is_acp_model(&selected_model),
         );
         let displayed_percent = meter.percent.unwrap_or_default();
         let meter_color = if meter.percent.is_none() || displayed_percent == 0.0 {
@@ -3887,7 +4055,12 @@ impl ChatListView {
                     .child(
                         ProgressCircle::new("context-meter-circle")
                             .value(meter.bar_percent as f32)
-                            .loading(is_generating && meter.bar_percent == 0.0)
+                            // Only animate while a figure is actually pending;
+                            // a model that never reports one would spin for the
+                            // whole turn, every turn.
+                            .loading(
+                                is_generating && meter.reports_usage && meter.bar_percent == 0.0,
+                            )
                             .color(meter_color)
                             .size(px(24.0)),
                     )
@@ -4218,6 +4391,7 @@ impl ChatListView {
                             .gap_1()
                             .child(model_picker)
                             .child(effort_picker)
+                            .children(acp_settings_picker)
                             .child(div().flex_1())
                             .child(stash_button)
                             .children(subagent_popover)
@@ -4632,6 +4806,42 @@ mod hot_path_tests {
         }
     }
 
+    #[test]
+    fn a_model_that_never_reports_usage_is_not_shown_as_estimating() {
+        // An ACP agent runs its own loop and sends no token accounting, so the
+        // meter has nothing to project. Rendering that as "Estimating…" both
+        // promises a number that never arrives and leaves the badge animating
+        // for the whole turn.
+        let view = context_meter_view_model(None, &ContextMeterMetrics::default(), false);
+        assert!(!view.reports_usage);
+        assert_eq!(view.current_label, "Not reported");
+        assert_eq!(view.percent, None);
+        assert_eq!(view.bar_percent, 0.0);
+
+        // A model that does report usage keeps the pending state, so the
+        // animation still runs where a figure is genuinely on its way.
+        let estimating = context_meter_view_model(None, &ContextMeterMetrics::default(), true);
+        assert!(estimating.reports_usage);
+        assert_eq!(estimating.current_label, "Estimating…");
+    }
+
+    #[test]
+    fn an_unreported_context_still_shows_what_was_processed() {
+        // Turn counts and any usage Threadlane did observe stay meaningful
+        // even when the context window itself is unmeasurable.
+        let view = context_meter_view_model(
+            None,
+            &ContextMeterMetrics {
+                billed_input_tokens: 1_200,
+                output_tokens: 800,
+                cache_hit_percent: Some(40),
+            },
+            false,
+        );
+        assert_eq!(view.total_processed_label, "2.0k");
+        assert_eq!(view.cache_hit_label.as_deref(), Some("40%"));
+    }
+
     #[tokio::test]
     async fn meter_separates_current_context_from_total_processed() {
         let (path, state) = reported_session_shape_state().await;
@@ -4652,6 +4862,7 @@ mod hot_path_tests {
                 output_tokens: projected_metrics.output_tokens,
                 cache_hit_percent: projected_metrics.cache_hit_percent(),
             },
+            true,
         );
         let percent = view.percent.expect("known context percentage");
         assert!((percent - 29.904_687_5).abs() < 1e-12);
@@ -4666,7 +4877,7 @@ mod hot_path_tests {
     #[test]
     fn meter_estimating_context_has_no_false_percentage() {
         let view =
-            context_meter_view_model(Some(&estimating_context()), &ContextMeterMetrics::default());
+            context_meter_view_model(Some(&estimating_context()), &ContextMeterMetrics::default(), true);
         assert_eq!(view.percent, None);
         assert_eq!(view.current_label, "Estimating…");
         assert_eq!(view.bar_percent, 0.0);
@@ -4679,7 +4890,7 @@ mod hot_path_tests {
         context.current_tokens = 42;
         context.estimating = false;
 
-        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default());
+        let view = context_meter_view_model(Some(&context), &ContextMeterMetrics::default(), true);
 
         assert_eq!(view.percent, None);
         assert_eq!(view.current_label, "Estimating…");
@@ -4708,6 +4919,7 @@ mod hot_path_tests {
                 estimating: false,
             }),
             &ContextMeterMetrics::default(),
+            true,
         );
         assert_eq!(view.percent, Some(120.0));
         assert_eq!(view.bar_percent, 100.0);
