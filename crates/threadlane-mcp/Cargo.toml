@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Model Context Protocol (MCP) client engine for threadlane agent"
 
+[features]
+hotpath = ["hotpath/hotpath"]
+
 [dependencies]
 threadlane-runtime = { version = "0.1.0", path = "../threadlane-runtime" }
 tokio = { version = "1.38", features = ["full"] }
@@ -13,4 +16,5 @@ async-trait = "0.1"
 futures = "0.3"
 
 [dev-dependencies]
+hotpath = "0.24"
 tempfile = "3.10"
