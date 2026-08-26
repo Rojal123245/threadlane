@@ -1,5 +1,7 @@
 //! Headless benchmarks for the terminal parser hot paths.
 
+const SCROLLBACK_ROWS: usize = 10_000;
+
 fn fixture() -> Vec<u8> {
     let mut output = Vec::with_capacity(2_000 * 64);
     for line in 0..2_000 {
@@ -16,14 +18,14 @@ fn fixture() -> Vec<u8> {
 
 #[hotpath::measure]
 fn parse_terminal_output(bytes: &[u8]) {
-    let mut parser = vt100::Parser::new(24, 80, 1_000);
+    let mut parser = vt100::Parser::new(24, 80, SCROLLBACK_ROWS);
     parser.process(bytes);
     std::hint::black_box(parser.screen().state_formatted());
 }
 
 #[hotpath::measure]
 fn resize_and_scrollback(bytes: &[u8]) {
-    let mut parser = vt100::Parser::new(24, 80, 1_000);
+    let mut parser = vt100::Parser::new(24, 80, SCROLLBACK_ROWS);
     parser.process(bytes);
     for (rows, cols) in [(40, 120), (24, 80), (60, 160), (24, 80)] {
         parser.screen_mut().set_size(rows, cols);
