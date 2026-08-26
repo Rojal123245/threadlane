@@ -1,0 +1,48 @@
+name: hotpath-profile
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hotpath-profile-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hotpath-profile
+      - run: mkdir -p /tmp/metrics
+      - name: Benchmark head
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/head.json
+        run: cargo run -p threadlane-runtime --release --example hotpath_jsonl --features hotpath
+      - name: Benchmark base
+        env:
+          HOTPATH_OUTPUT_FORMAT: json
+          HOTPATH_OUTPUT_PATH: /tmp/metrics/base.json
+        run: |
+          git checkout --force '${{ github.event.pull_request.base.sha }}'
+          if test -f crates/threadlane-runtime/examples/hotpath_jsonl.rs; then
+            cargo run -p threadlane-runtime --release --example hotpath_jsonl --features hotpath
+          else
+            echo "Base branch has no Hotpath benchmark yet"
+          fi
+      - name: Save PR number
+        run: echo '${{ github.event.pull_request.number }}' > /tmp/metrics/pr_number.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hotpath-metrics
+          path: /tmp/metrics/
+          retention-days: 1

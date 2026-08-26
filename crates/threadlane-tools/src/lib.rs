@@ -1648,7 +1648,8 @@ mod tests {
         assert!(
             pr_res.contains("pr://70")
                 || pr_res.contains("\"number\": 70")
-                || pr_res.contains("https://github.com/")
+                || pr_res.contains("https://github.com/"),
+            "unexpected PR response: {pr_res}"
         );
 
         // Test GitLab MR URL parsing error format when glab CLI or git remote is missing

@@ -347,6 +347,10 @@ fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Resu
         "pr" | "mr" => format!("repos/{owner_repo}/pulls/{number}"),
         _ => format!("repos/{owner_repo}/issues/{number}"),
     };
+    let web_url = match kind {
+        "pr" | "mr" => format!("https://github.com/{owner_repo}/pull/{number}"),
+        _ => format!("https://github.com/{owner_repo}/issues/{number}"),
+    };
 
     // Strategy 1: gh CLI
     if let Ok(output) = Command::new("gh")
@@ -393,7 +397,8 @@ fn fetch_github(root: &Path, owner_repo: &str, kind: &str, number: &str) -> Resu
             }
         }
         Ok(output) => Err(format!(
-            "GitHub API request failed: {}",
+            "GitHub API request for {web_url} failed ({}): {}",
+            output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )),
         Err(e) => Err(format!(
@@ -414,6 +419,10 @@ fn fetch_gitlab(
     let endpoint = match kind {
         "pr" | "mr" => format!("projects/{encoded_project}/merge_requests/{number}"),
         _ => format!("projects/{encoded_project}/issues/{number}"),
+    };
+    let web_url = match kind {
+        "pr" | "mr" => format!("https://{host}/{project_path}/-/merge_requests/{number}"),
+        _ => format!("https://{host}/{project_path}/-/issues/{number}"),
     };
 
     // Strategy 1: glab CLI
@@ -455,7 +464,8 @@ fn fetch_gitlab(
             }
         }
         Ok(output) => Err(format!(
-            "GitLab API request failed: {}",
+            "GitLab API request for {web_url} failed ({}): {}",
+            output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )),
         Err(e) => Err(format!(

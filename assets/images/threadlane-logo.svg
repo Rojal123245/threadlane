@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Threadlane icon</title>
+  <desc id="desc">Three bold threads join into a single vertical lane.</desc>
+  <rect width="512" height="512" rx="112" fill="#0B0F14"/>
+  <g fill="none" stroke="#F7F8FA" stroke-linecap="round" stroke-linejoin="round" stroke-width="44">
+    <path d="M118 154H394"/>
+    <path d="M118 236H330"/>
+    <path d="M118 318H266"/>
+    <path d="M266 154V394"/>
+  </g>
+  <circle cx="266" cy="394" r="22" fill="#F7F8FA"/>
+</svg>

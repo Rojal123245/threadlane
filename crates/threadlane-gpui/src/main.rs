@@ -62,6 +62,7 @@ fn dump_config(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[hotpath::main]
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--dump-config") {

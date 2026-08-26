@@ -163,12 +163,14 @@ fn start_parser_worker(
                         ParserCommand::Resize(new_rows, new_cols) => {
                             rows = new_rows.max(1);
                             cols = new_cols.max(1);
-                            parser.set_size(rows, cols);
+                            parser.screen_mut().set_size(rows, cols);
                             let offset = parser.screen().scrollback().min(rows as usize);
-                            parser.set_scrollback(offset);
+                            parser.screen_mut().set_scrollback(offset);
                         }
                         ParserCommand::SetScrollback(offset) => {
-                            parser.set_scrollback(offset.min(rows as usize));
+                            parser
+                                .screen_mut()
+                                .set_scrollback(offset.min(rows as usize));
                         }
                     }
                     dirty = true;
@@ -204,7 +206,7 @@ fn start_parser_worker(
                         saturated = terminal_parse_budget_exhausted(parsed_bytes, parse_budget);
                         parser.process(&bytes);
                         let offset = parser.screen().scrollback().min(rows as usize);
-                        parser.set_scrollback(offset);
+                        parser.screen_mut().set_scrollback(offset);
                         dirty = true;
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -868,7 +870,7 @@ impl Render for TerminalView {
                     let char_str = if cell_content.is_empty() {
                         " "
                     } else {
-                        cell_content.as_str()
+                        cell_content
                     };
 
                     let fg = if is_selected {
