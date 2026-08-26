@@ -19,23 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - id: runtime
-            package: threadlane-runtime
-            example: hotpath_jsonl
-            example_path: crates/threadlane-runtime/examples/hotpath_jsonl.rs
-          - id: tools
-            package: threadlane-tools
-            example: hotpath_search
-            example_path: crates/threadlane-tools/examples/hotpath_search.rs
-          - id: mcp
-            package: threadlane-mcp
-            example: hotpath_mcp
-            example_path: crates/threadlane-mcp/examples/hotpath_mcp.rs
-          - id: terminal
-            package: threadlane-gpui
-            example: hotpath_terminal
-            example_path: crates/threadlane-gpui/examples/hotpath_terminal.rs
+        id: [runtime, tools, mcp, terminal]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,17 +34,17 @@ jobs:
         env:
           HOTPATH_OUTPUT_FORMAT: json
           HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.id }}/head.json
-        run: cargo run -p ${{ matrix.package }} --release --example ${{ matrix.example }} --features hotpath
+        run: cargo run -p threadlane-benchmarks --release --bin ${{ matrix.id }} --features hotpath
       - name: Benchmark base
         env:
           HOTPATH_OUTPUT_FORMAT: json
           HOTPATH_OUTPUT_PATH: /tmp/metrics/${{ matrix.id }}/base.json
         run: |
           git checkout --force '${{ github.event.pull_request.base.sha }}'
-          if test -f '${{ matrix.example_path }}'; then
-            cargo run -p ${{ matrix.package }} --release --example ${{ matrix.example }} --features hotpath
+          if test -f 'crates/threadlane-benchmarks/src/bin/${{ matrix.id }}.rs'; then
+            cargo run -p threadlane-benchmarks --release --bin ${{ matrix.id }} --features hotpath
           else
-            echo "Base branch has no Hotpath benchmark yet"
+            echo "Base branch has no centralized Hotpath benchmark yet"
           fi
       - name: Save PR number
         run: echo '${{ github.event.pull_request.number }}' > /tmp/metrics/${{ matrix.id }}/pr_number.txt
