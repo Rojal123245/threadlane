@@ -30,12 +30,55 @@ jobs:
       - name: Post benchmark comparison
         env:
           GH_TOKEN: ${{ github.token }}
+          WORKFLOW_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: |
-          pr_number="${{ github.event.workflow_run.pull_requests[0].number }}"
+          pr_number="$WORKFLOW_PR_NUMBER"
           if test -z "$pr_number"; then
-            echo "Workflow run has no pull request; skipping"
-            exit 0
+            candidate=""
+            for metrics in /tmp/metrics/*; do
+              test -d "$metrics" || continue
+              suite_id="$(basename "$metrics")"
+              case "$suite_id" in
+                runtime|tools|mcp|terminal) ;;
+                *) continue ;;
+              esac
+              test -f "$metrics/pr_number.txt" || continue
+              if test "$(wc -c < "$metrics/pr_number.txt")" -gt 32; then
+                echo "Invalid PR candidate for $suite_id" >&2
+                exit 1
+              fi
+              suite_candidate="$(<"$metrics/pr_number.txt")"
+              case "$suite_candidate" in
+                ''|*[!0-9]*)
+                  echo "Invalid PR candidate for $suite_id" >&2
+                  exit 1
+                  ;;
+              esac
+              if test -n "$candidate" && test "$candidate" != "$suite_candidate"; then
+                echo "Ambiguous PR candidates in benchmark artifacts" >&2
+                exit 1
+              fi
+              candidate="$suite_candidate"
+            done
+            if test -z "$candidate"; then
+              echo "Workflow run has no trusted or verifiable pull request" >&2
+              exit 1
+            fi
+            mapfile -t pr_head < <(
+              gh api "repos/$GITHUB_REPOSITORY/pulls/$candidate" \
+                --jq '.head.sha // "", .head.repo.full_name // ""'
+            )
+            if test "${#pr_head[@]}" -ne 2 \
+              || test "${pr_head[0]}" != "$WORKFLOW_HEAD_SHA" \
+              || test "${pr_head[1]}" != "$WORKFLOW_HEAD_REPOSITORY"; then
+              echo "Artifact PR #$candidate does not match the workflow run head" >&2
+              exit 1
+            fi
+            pr_number="$candidate"
           fi
+          failures=0
           for metrics in /tmp/metrics/*; do
             test -d "$metrics" || continue
             suite_id="$(basename "$metrics")"
@@ -50,12 +93,26 @@ jobs:
               echo "Missing metrics for $suite_id; skipping"
               continue
             fi
-            if ! hotpath-utils profile-pr \
-              --head-metrics "$metrics/head.json" \
-              --base-metrics "$metrics/base.json" \
-              --pr-number "$pr_number" \
-              --benchmark-id "$suite_id" \
-              --github-token "$GH_TOKEN"; then
+            if comparison_output="$(
+              hotpath-utils profile-pr \
+                --head-metrics "$metrics/head.json" \
+                --base-metrics "$metrics/base.json" \
+                --pr-number "$pr_number" \
+                --benchmark-id "$suite_id" \
+                --github-token "$GH_TOKEN" 2>&1
+            )"; then
+              comparison_status=0
+            else
+              comparison_status=$?
+            fi
+            printf '%s\n' "$comparison_output"
+            if test "$comparison_status" -ne 0 \
+              || [[ "$comparison_output" == *"Failed to post/update comment"* ]]; then
               echo "Comparison failed for $suite_id; continuing"
+              failures=$((failures + 1))
             fi
           done
+          if test "$failures" -ne 0; then
+            echo "$failures benchmark comparison(s) failed" >&2
+            exit 1
+          fi

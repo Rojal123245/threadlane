@@ -12,6 +12,8 @@ concurrency:
 
 jobs:
   profile:
+    env:
+      HOTPATH_METRICS_SERVER_OFF: 1
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -38,6 +40,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:

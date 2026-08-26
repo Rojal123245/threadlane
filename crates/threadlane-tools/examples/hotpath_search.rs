@@ -3,6 +3,8 @@ use std::path::Path;
 
 use threadlane_tools::search::grep_search;
 
+const SAMPLES: usize = 10;
+
 #[hotpath::measure]
 fn search_warm_tree(root: &Path) {
     for _ in 0..20 {
@@ -22,5 +24,7 @@ fn main() {
     }
 
     grep_search(directory.path(), "needle", Some("*.txt")).unwrap();
-    search_warm_tree(directory.path());
+    for _ in 0..SAMPLES {
+        search_warm_tree(directory.path());
+    }
 }

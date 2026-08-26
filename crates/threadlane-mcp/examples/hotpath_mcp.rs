@@ -9,6 +9,8 @@ use threadlane_mcp::{
 };
 use threadlane_runtime::ToolExecutor;
 
+const SAMPLES: usize = 10;
+
 fn stub_server_script(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("stub_mcp.sh");
     std::fs::write(
@@ -96,8 +98,12 @@ async fn async_main() {
         .await;
 
     manager.discover_and_connect().await;
-    discover_repeat(&manager).await;
+    for _ in 0..SAMPLES {
+        discover_repeat(&manager).await;
+    }
 
     let executor = McpToolExecutor::new(Arc::clone(&manager));
-    tool_calls(&executor).await;
+    for _ in 0..SAMPLES {
+        tool_calls(&executor).await;
+    }
 }
