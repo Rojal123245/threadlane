@@ -152,7 +152,7 @@ impl SettingsView {
         });
         let acp_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Claude Code"));
         let acp_command_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("npx -y @zed-industries/claude-code-acp")
+            InputState::new(window, cx).placeholder("npx -y @agentclientprotocol/claude-agent-acp")
         });
 
         let (auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel();
