@@ -35,7 +35,22 @@ use crate::acp::{
 };
 use crate::acp_bridge::agent_events_for;
 use crate::permission::{PermissionDecision, PermissionHandle};
-use threadlane_runtime::{AgentEvent, ImageAttachment, ReasoningEffort, TokenUsage};
+use threadlane_runtime::{
+    AgentEvent, AgentToolResult, ImageAttachment, ReasoningEffort, TokenUsage,
+};
+
+/// Durable tool activity collected while an ACP turn streams.
+pub(crate) struct AcpTurnToolActivity {
+    pub(crate) tool_call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+    pub(crate) result: Option<AgentToolResult>,
+}
+
+pub(crate) struct AcpTurnOutcome {
+    pub(crate) reply: String,
+    pub(crate) tools: Vec<AcpTurnToolActivity>,
+}
 
 /// A live connection to one external ACP agent, reused across turns.
 pub struct AcpEngine {
@@ -111,6 +126,20 @@ impl AcpEngine {
         event_tx: &broadcast::Sender<AgentEvent>,
         permissions: &PermissionHandle,
     ) -> Result<String, String> {
+        self.run_turn_detailed(agent_id, prompt, images, effort, event_tx, permissions)
+            .await
+            .map(|outcome| outcome.reply)
+    }
+
+    pub(crate) async fn run_turn_detailed(
+        &mut self,
+        agent_id: &str,
+        prompt: &str,
+        images: &[ImageAttachment],
+        effort: ReasoningEffort,
+        event_tx: &broadcast::Sender<AgentEvent>,
+        permissions: &PermissionHandle,
+    ) -> Result<AcpTurnOutcome, String> {
         if let Err(error) = self.ensure_session(agent_id, event_tx, permissions).await {
             let _ = event_tx.send(AgentEvent::AgentError {
                 error: error.clone(),
@@ -155,11 +184,12 @@ impl AcpEngine {
         // they must be awaited together: draining only after the prompt
         // resolves would withhold the whole turn's output until the end.
         let mut reply = String::new();
+        let mut tools = Vec::new();
         let outcome = loop {
             tokio::select! {
                 notification = active.updates.recv() => match notification {
                     Some(notification) => {
-                        forward_update(notification, &session_id, event_tx, &mut reply);
+                        forward_update(notification, &session_id, event_tx, &mut reply, &mut tools);
                     }
                     // The handler holds the sender for the session's lifetime,
                     // so this only closes if the connection is gone.
@@ -172,7 +202,7 @@ impl AcpEngine {
         // The agent emits its closing chunks just before answering the prompt,
         // so anything already queued still belongs to this turn.
         while let Ok(notification) = active.updates.try_recv() {
-            forward_update(notification, &session_id, event_tx, &mut reply);
+            forward_update(notification, &session_id, event_tx, &mut reply, &mut tools);
         }
         guard.completed = true;
 
@@ -186,7 +216,7 @@ impl AcpEngine {
                 let _ = event_tx.send(AgentEvent::AgentEnd {
                     usage: TokenUsage::default(),
                 });
-                Ok(reply)
+                Ok(AcpTurnOutcome { reply, tools })
             }
             Err(error) => {
                 // A failed turn can leave the connection in an unknown state;
@@ -526,17 +556,41 @@ fn forward_update(
     session_id: &str,
     event_tx: &broadcast::Sender<AgentEvent>,
     reply: &mut String,
+    tools: &mut Vec<AcpTurnToolActivity>,
 ) {
     if notification.session_id != session_id {
         return;
     }
     for event in agent_events_for(notification.update) {
-        if let AgentEvent::MessageUpdate {
-            text_delta: Some(text),
-            ..
-        } = &event
-        {
-            reply.push_str(text);
+        match &event {
+            AgentEvent::MessageUpdate {
+                text_delta: Some(text),
+                ..
+            } => reply.push_str(text),
+            AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                name,
+                arguments,
+            } => tools.push(AcpTurnToolActivity {
+                tool_call_id: tool_call_id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+                result: None,
+            }),
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                result,
+                ..
+            } => {
+                if let Some(tool) = tools
+                    .iter_mut()
+                    .rev()
+                    .find(|tool| tool.tool_call_id == *tool_call_id)
+                {
+                    tool.result = Some(result.clone());
+                }
+            }
+            _ => {}
         }
         let _ = event_tx.send(event);
     }
@@ -849,6 +903,57 @@ mod tests {
         assert!(stop_reason_note(AcpStopReason::Cancelled).is_none());
         assert!(stop_reason_note(AcpStopReason::Refusal).is_some());
         assert!(stop_reason_note(AcpStopReason::MaxTokens).is_some());
+    }
+
+    #[test]
+    fn forwarded_tool_activity_is_retained_for_durable_journaling() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut reply = String::new();
+        let mut tools = Vec::new();
+        let start = serde_json::from_value::<AcpToolCall>(json!({
+            "toolCallId": "call-1",
+            "title": "Read main.rs",
+            "kind": "read",
+            "rawInput": { "path": "src/main.rs" }
+        }))
+        .unwrap();
+        forward_update(
+            AcpSessionNotification {
+                session_id: "session-1".into(),
+                update: AcpSessionUpdate::ToolCall(start),
+            },
+            "session-1",
+            &event_tx,
+            &mut reply,
+            &mut tools,
+        );
+        let finish = serde_json::from_value::<AcpToolCall>(json!({
+            "toolCallId": "call-1",
+            "title": "Read main.rs",
+            "status": "completed",
+            "content": [{
+                "type": "content",
+                "content": { "type": "text", "text": "fn main() {}" }
+            }]
+        }))
+        .unwrap();
+        forward_update(
+            AcpSessionNotification {
+                session_id: "session-1".into(),
+                update: AcpSessionUpdate::ToolCallUpdate(finish),
+            },
+            "session-1",
+            &event_tx,
+            &mut reply,
+            &mut tools,
+        );
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_call_id, "call-1");
+        assert_eq!(tools[0].arguments, r#"{"path":"src/main.rs"}"#);
+        let result = tools[0].result.as_ref().expect("terminal tool result");
+        assert_eq!(result.content, "fn main() {}");
+        assert!(!result.is_error);
     }
 
     #[test]

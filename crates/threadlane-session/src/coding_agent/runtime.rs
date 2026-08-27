@@ -671,7 +671,7 @@ impl CodingAgent {
         let permissions = self.permission_handle.clone();
         let outcome = self
             .acp
-            .run_turn(
+            .run_turn_detailed(
                 agent_id,
                 input,
                 &images,
@@ -682,8 +682,8 @@ impl CodingAgent {
             .await;
 
         let run_id = harness_run_id.as_ref().map(|run| run.run_id.as_str());
-        let reply = match outcome {
-            Ok(reply) => reply,
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
             Err(error) => {
                 // `run_turn` already reported the failure as an event; closing
                 // the run keeps the journal from holding an open operation.
@@ -695,27 +695,78 @@ impl CodingAgent {
         };
 
         if let (Some(run_id), Some(journal)) = (run_id, self.harness.as_mut()) {
-            // ACP reports no token accounting, so the attempt records zero
-            // usage rather than a number the agent never sent.
-            let recorded = journal
-                .append_message_to_lane(
-                    "main",
-                    run_id,
-                    AgentMessage::Assistant {
-                        content: Some(reply),
-                        tool_calls: None,
-                        stop_reason: None,
-                        deferred_handle: None,
-                    },
-                )
-                .and_then(|_| journal.record_assistant_attempt(run_id, TokenUsage::default()));
+            let tool_calls = (!outcome.tools.is_empty()).then(|| {
+                outcome
+                    .tools
+                    .iter()
+                    .map(|tool| threadlane_provider::openai::ToolCall {
+                        id: tool.tool_call_id.clone(),
+                        r#type: "function".into(),
+                        function: threadlane_provider::openai::ToolCallFunction {
+                            name: tool.name.clone(),
+                            arguments: tool.arguments.clone(),
+                        },
+                        thought_signature: None,
+                    })
+                    .collect()
+            });
+            let recorded = journal.append_message_to_lane(
+                "main",
+                run_id,
+                AgentMessage::Assistant {
+                    content: Some(outcome.reply),
+                    tool_calls,
+                    stop_reason: None,
+                    deferred_handle: None,
+                },
+            );
             if let Err(error) = recorded {
                 let _ = self
-                    .finish_harness_run(
-                        Some(run_id),
-                        OperationOutcome::Failed,
-                        Some(error.clone()),
-                    )
+                    .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
+                    .await;
+                return Some(Err(format!("Harness Error: {error}")));
+            }
+
+            // ACP tools execute inside the external agent, but their ordered
+            // lifecycle still belongs in the canonical trajectory.
+            for tool in outcome.tools {
+                let arguments = serde_json::from_str(&tool.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::String(tool.arguments.clone()));
+                let recorded = journal
+                    .tool_started_on_lane("main", run_id, &tool.tool_call_id, &tool.name, arguments)
+                    .and_then(|_| {
+                        let mut result = tool.result.unwrap_or_else(|| {
+                            threadlane_runtime::types::AgentToolResult::external(
+                                tool.tool_call_id,
+                                tool.name.clone(),
+                                "ACP tool call ended without a terminal update",
+                                true,
+                            )
+                        });
+                        // ACP terminal updates are patches and commonly omit the
+                        // start event's title. The durable harness requires the
+                        // result name to match its intent exactly.
+                        result.name = tool.name;
+                        journal.finish_tool_result(run_id, &result)
+                    });
+                if let Err(error) = recorded {
+                    let _ = self
+                        .finish_harness_run(
+                            Some(run_id),
+                            OperationOutcome::Failed,
+                            Some(error.clone()),
+                        )
+                        .await;
+                    return Some(Err(format!("Harness Error: {error}")));
+                }
+            }
+
+            // ACP reports no token accounting, so the attempt records zero
+            // usage rather than a number the agent never sent.
+            let recorded = journal.record_assistant_attempt(run_id, TokenUsage::default());
+            if let Err(error) = recorded {
+                let _ = self
+                    .finish_harness_run(Some(run_id), OperationOutcome::Failed, Some(error.clone()))
                     .await;
                 return Some(Err(format!("Harness Error: {error}")));
             }
@@ -1219,9 +1270,7 @@ impl CodingAgent {
         // here rather than through the provider run below.
         if let Some(agent_id) = crate::acp_bridge::acp_agent_id(&self.agent.model()) {
             let agent_id = agent_id.to_string();
-            return self
-                .run_acp_turn(&agent_id, effective_input, images)
-                .await;
+            return self.run_acp_turn(&agent_id, effective_input, images).await;
         }
 
         let msg = AgentMessage::user(effective_input, images);
