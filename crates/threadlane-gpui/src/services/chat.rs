@@ -136,11 +136,14 @@ pub(crate) fn execute_prompt(
         // Read after the turn because an external agent defines its own
         // settings and only reports them once a session is open. This is the
         // free path: the turn already connected, so nothing is started here.
-        let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
-            session_id: task_session_id.clone(),
-            options: agent.acp_user_config_options(),
-            error: None,
-        });
+        let acp_options = agent.acp_user_config_options();
+        if !acp_options.is_empty() {
+            let _ = task_stream_tx.send(ChatStreamEvent::AcpConfigOptions {
+                session_id: task_session_id.clone(),
+                options: acp_options,
+                error: None,
+            });
+        }
         drop(agent);
         cleanup.error = run_error;
     });

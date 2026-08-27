@@ -197,11 +197,10 @@ impl CodingAgent {
         let Some(agent_id) = crate::acp_bridge::acp_agent_id(&model) else {
             return Ok(Vec::new());
         };
-        let agent_id = agent_id.to_string();
         let event_tx = self.agent.event_tx.clone();
         let permissions = self.permission_handle.clone();
         self.acp
-            .ensure_connected(&agent_id, &event_tx, &permissions)
+            .ensure_connected(agent_id, &event_tx, &permissions)
             .await
     }
 
@@ -213,12 +212,11 @@ impl CodingAgent {
     ) -> Result<Vec<crate::acp::AcpConfigOption>, String> {
         let model = self.agent.model();
         let agent_id = crate::acp_bridge::acp_agent_id(&model)
-            .ok_or_else(|| format!("Model '{model}' is not an ACP agent"))?
-            .to_string();
+            .ok_or_else(|| format!("Model '{model}' is not an ACP agent"))?;
         let event_tx = self.agent.event_tx.clone();
         let permissions = self.permission_handle.clone();
         self.acp
-            .set_config_option(&agent_id, config_id, value, &event_tx, &permissions)
+            .set_config_option(agent_id, config_id, value, &event_tx, &permissions)
             .await
     }
 

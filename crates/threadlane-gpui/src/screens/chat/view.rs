@@ -2678,7 +2678,7 @@ impl ChatListView {
                 let markdown_state =
                     self.markdown_state(format!("reasoning-{}", msg.id), reasoning, cx);
                 container
-                    .child(TextView::new(&markdown_state).selectable(true))
+                    .child(self.chat_markdown_view(&markdown_state))
                     .into_any_element()
             }
         });
@@ -3757,7 +3757,7 @@ impl ChatListView {
             let Some(acp_model) = acp_model_option.as_ref() else {
                 return menu;
             };
-            let current = acp_model.current_value().map(str::to_string);
+            let current = acp_model.current_value();
             let config_id = acp_model.id.clone();
             let menu = menu
                 .item(PopupMenuItem::separator())
@@ -3768,7 +3768,7 @@ impl ChatListView {
                 let value = choice.value.clone();
                 menu.item(
                     PopupMenuItem::new(choice.name.clone())
-                        .checked(current.as_deref() == Some(choice.value.as_str()))
+                        .checked(current == Some(choice.value.as_str()))
                         .on_click(move |_event, _window, cx| {
                             model.update(cx, |state, cx| {
                                 controller::dispatch(

@@ -3500,14 +3500,14 @@ impl AppState {
                         self.session_status = Some(error);
                         active_changed = true;
                     }
-                    let current = self.acp_config_options.get(&session_id);
-                    if current != Some(&options) {
-                        if options.is_empty() {
-                            self.acp_config_options.remove(&session_id);
-                        } else {
-                            self.acp_config_options
-                                .insert(session_id.clone(), options);
+                    if options.is_empty() {
+                        if self.acp_config_options.remove(&session_id).is_some()
+                            && self.active_session_id.as_deref() == Some(&session_id)
+                        {
+                            active_changed = true;
                         }
+                    } else if self.acp_config_options.get(&session_id) != Some(&options) {
+                        self.acp_config_options.insert(session_id.clone(), options);
                         if self.active_session_id.as_deref() == Some(&session_id) {
                             active_changed = true;
                         }
