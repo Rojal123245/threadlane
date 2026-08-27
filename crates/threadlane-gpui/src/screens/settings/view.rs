@@ -2548,7 +2548,8 @@ impl SettingsView {
                     .children(settings::ACP_PRESETS.iter().map(|preset| {
                         let preset_view = cx.entity().downgrade();
                         let configured = rows.iter().find(|record| {
-                            record.config.id == preset.id && record.config.scope == selected_scope
+                            preset.matches_agent(&record.config)
+                                && record.config.scope == selected_scope
                         });
                         let enabled = configured.is_some_and(|record| record.config.enabled);
                         let status = configured
@@ -2701,7 +2702,7 @@ impl SettingsView {
             .children(rows.into_iter().filter_map(|record| {
                 if settings::ACP_PRESETS
                     .iter()
-                    .any(|preset| preset.id == record.config.id)
+                    .any(|preset| preset.matches_agent(&record.config))
                 {
                     return None;
                 }

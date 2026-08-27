@@ -154,6 +154,22 @@ pub(crate) struct AcpPreset {
     previous_commands: &'static [&'static str],
 }
 
+impl AcpPreset {
+    pub fn matches_agent(&self, agent: &AcpAgentConfig) -> bool {
+        self.id == agent.id
+    }
+
+    pub fn needs_command_upgrade(&self, agent: &AcpAgentConfig) -> bool {
+        self.previous_commands
+            .contains(&agent.command_line().as_str())
+    }
+
+    pub fn to_agent_config(&self, scope: AcpScope) -> AcpAgentConfig {
+        AcpAgentConfig::from_command_line(self.name, self.command, scope)
+            .expect("built-in ACP presets must have a name and command")
+    }
+}
+
 pub(crate) const ACP_PRESETS: &[AcpPreset] = &[
     AcpPreset {
         id: "claude_code",
@@ -181,16 +197,12 @@ pub(crate) fn upgrade_acp_presets(project_root: Option<&Path>) -> Result<(), Str
         let mut agents = load_acp_scope(project_root, scope)?;
         let mut changed = false;
         for preset in ACP_PRESETS {
-            let Some(agent) = agents.iter_mut().find(|agent| agent.id == preset.id) else {
+            let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) else {
                 continue;
             };
-            if preset
-                .previous_commands
-                .contains(&agent.command_line().as_str())
-            {
+            if preset.needs_command_upgrade(agent) {
                 let enabled = agent.enabled;
-                *agent = AcpAgentConfig::from_command_line(preset.name, preset.command, scope)
-                    .expect("built-in ACP presets must have a name and command");
+                *agent = preset.to_agent_config(scope);
                 agent.enabled = enabled;
                 changed = true;
             }
@@ -209,18 +221,13 @@ pub(crate) fn set_acp_preset_enabled(
     enabled: bool,
 ) -> Result<(), String> {
     let mut agents = load_acp_scope(project_root, scope)?;
-    if let Some(agent) = agents.iter_mut().find(|agent| agent.id == preset.id) {
-        if preset
-            .previous_commands
-            .contains(&agent.command_line().as_str())
-        {
-            *agent = AcpAgentConfig::from_command_line(preset.name, preset.command, scope)
-                .expect("built-in ACP presets must have a name and command");
+    if let Some(agent) = agents.iter_mut().find(|agent| preset.matches_agent(agent)) {
+        if preset.needs_command_upgrade(agent) {
+            *agent = preset.to_agent_config(scope);
         }
         agent.enabled = enabled;
     } else {
-        let mut config = AcpAgentConfig::from_command_line(preset.name, preset.command, scope)
-            .expect("built-in ACP presets must have a name and command");
+        let mut config = preset.to_agent_config(scope);
         config.enabled = enabled;
         agents.push(config);
     }

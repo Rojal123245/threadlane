@@ -1464,6 +1464,7 @@ impl AppState {
         let session_file = self.session_file(work_dir, session_id);
         self.session_runtimes.remove(&session_file);
         self.pending_composer_messages.remove(session_id);
+        self.acp_config_options.remove(session_id);
         if let Some(project) = self
             .projects
             .iter_mut()

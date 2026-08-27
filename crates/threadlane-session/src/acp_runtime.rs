@@ -27,8 +27,8 @@ use log::warn;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::acp::{
-    ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODEL, ACP_CONFIG_ID_AGENT, AcpClientHandler,
-    AcpConfigOption, AcpContentBlock, AcpManager, AcpPermissionOptionKind, AcpPermissionOutcome,
+    ACP_CONFIG_CATEGORY_EFFORT, ACP_CONFIG_CATEGORY_MODEL, AcpClientHandler, AcpConfigOption,
+    AcpContentBlock, AcpManager, AcpPermissionOptionKind, AcpPermissionOutcome,
     AcpPermissionRequest, AcpReadTextFileRequest, AcpSession, AcpSessionNotification,
     AcpSessionUpdate, AcpStopReason, AcpToolCall, AcpWorkspaceClient, AcpWriteTextFileRequest,
     config_option_for,
@@ -256,10 +256,7 @@ impl AcpEngine {
             .map(|active| active.session.config_options())
             .unwrap_or_default()
             .into_iter()
-            .filter(|option| {
-                option.category.as_deref() != Some(ACP_CONFIG_CATEGORY_EFFORT)
-                    && option.id != ACP_CONFIG_ID_AGENT
-            })
+            .filter(AcpConfigOption::is_user_configurable)
             .collect()
     }
 

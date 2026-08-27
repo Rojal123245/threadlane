@@ -430,6 +430,15 @@ impl AcpConfigOption {
     fn is_category(&self, category: &str) -> bool {
         self.category.as_deref() == Some(category)
     }
+
+    /// Whether this option should be presented to the user for configuration.
+    ///
+    /// Excludes effort/thought level (owned by the reasoning picker) and
+    /// agent persona (owned by the agent's internal routing).
+    pub fn is_user_configurable(&self) -> bool {
+        self.category.as_deref() != Some(ACP_CONFIG_CATEGORY_EFFORT)
+            && self.id != ACP_CONFIG_ID_AGENT
+    }
 }
 
 /// Finds the option an agent reports for `category`.
@@ -1490,18 +1499,23 @@ impl AcpSession {
         &self.connection
     }
 
+    /// Inspects the agent's session settings without cloning the vector.
+    pub fn with_config_options<R>(&self, f: impl FnOnce(&[AcpConfigOption]) -> R) -> R {
+        let guard = self.config_options.lock();
+        let options = guard.as_deref().map(Vec::as_slice).unwrap_or(&[]);
+        f(options)
+    }
+
     /// Snapshot of the agent's session settings.
     pub fn config_options(&self) -> Vec<AcpConfigOption> {
-        self.config_options
-            .lock()
-            .map(|options| options.clone())
-            .unwrap_or_default()
+        self.with_config_options(|options| options.to_vec())
     }
 
     /// Label the agent reports for `category`, such as which model it runs.
     pub fn config_label(&self, category: &str) -> Option<String> {
-        let options = self.config_options();
-        config_option_for(&options, category).and_then(AcpConfigOption::current_label)
+        self.with_config_options(|options| {
+            config_option_for(options, category).and_then(AcpConfigOption::current_label)
+        })
     }
 
     /// Sets one session setting, keeping the local snapshot in step with the
@@ -1554,9 +1568,11 @@ impl AcpSession {
             .connection
             .set_config_option(&self.session_id, config_id, value)
             .await?;
-        if !updated.is_empty() {
-            if let Ok(mut options) = self.config_options.lock() {
+        if let Ok(mut options) = self.config_options.lock() {
+            if !updated.is_empty() {
                 *options = updated;
+            } else if let Some(option) = options.iter_mut().find(|option| option.id == config_id) {
+                option.current_value = Value::String(value.to_string());
             }
         }
         Ok(())

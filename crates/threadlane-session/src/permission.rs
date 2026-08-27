@@ -408,7 +408,7 @@ impl PermissionHandle {
                 },
                 scope: match decision {
                     PermissionDecision::AllowAlways => {
-                        Some(threadlane_runtime::harness::PermissionTraceScope::Session)
+                        Some(threadlane_runtime::harness::PermissionTraceScope::Project)
                     }
                     PermissionDecision::AllowOnce => {
                         Some(threadlane_runtime::harness::PermissionTraceScope::Once)
